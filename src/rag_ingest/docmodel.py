@@ -150,10 +150,19 @@ class RawPage(BaseModel):
     #: correctly disables T2's visual evidence channel rather than silently
     #: falling back to a text-only judgement.
     image_png: bytes | None = None
+    #: Page extent in the same coordinate space as ``Element.bbox``. Required to
+    #: map a bbox onto the rendered image: without it the overlay (and any
+    #: evidence crop) would be a guess about scale.
+    width: float | None = Field(default=None, gt=0)
+    height: float | None = Field(default=None, gt=0)
 
     @property
     def char_len(self) -> int:
         return len(self.text)
+
+    @property
+    def has_size(self) -> bool:
+        return self.width is not None and self.height is not None
 
     @property
     def has_image(self) -> bool:
@@ -216,6 +225,7 @@ class RawDocument(BaseModel):
         elements: list[Element],
         *,
         page_images: dict[int, bytes] | None = None,
+        page_sizes: dict[int, tuple[float, float]] | None = None,
     ) -> tuple[RawDocument, list[Element]]:
         """Build a raw buffer from elements and rewrite their char offsets.
 
@@ -231,6 +241,7 @@ class RawDocument(BaseModel):
         space and independent of char offsets.
         """
         images = page_images or {}
+        sizes = page_sizes or {}
         by_page: dict[int, list[Element]] = {}
         for element in elements:
             by_page.setdefault(element.page, []).append(element)
@@ -250,11 +261,14 @@ class RawDocument(BaseModel):
                 located.append(
                     element.model_copy(update={"char_start": start, "char_end": cursor})
                 )
+            width, height = sizes.get(page_no, (None, None))
             pages.append(
                 RawPage(
                     page_no=page_no,
                     text="\n".join(parts),
                     image_png=images.get(page_no),
+                    width=width,
+                    height=height,
                 )
             )
 

@@ -143,16 +143,20 @@ def pdf_to_raw(
 
     elements: list[Element] = []
     page_images: dict[int, bytes] = {}
+    page_sizes: dict[int, tuple[float, float]] = {}
 
     with pdfplumber.open(path) as pdf:
         for page_no, page in enumerate(pdf.pages, start=1):
             elements.extend(page_to_elements(page, page_no))
+            page_sizes[page_no] = (float(page.width), float(page.height))
             if render_images:
                 png = _render_page(page, resolution=image_resolution)
                 if png is not None:
                     page_images[page_no] = png
 
-    return RawDocument.from_elements(doc_id, elements, page_images=page_images)
+    return RawDocument.from_elements(
+        doc_id, elements, page_images=page_images, page_sizes=page_sizes
+    )
 
 
 def _render_page(page: Any, *, resolution: int) -> bytes | None:

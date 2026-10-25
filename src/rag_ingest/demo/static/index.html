@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rag-ingest — grounding-gated ingestion</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --ink: #e6e8ee;
+    --muted: #8d95a5; --ok: #3fb950; --bad: #e5534b; --warn: #d29922;
+    --accent: #4c8dff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  main { display: grid; grid-template-columns: minmax(0,1.25fr) minmax(340px,1fr); gap: 0; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .col { padding: 20px 24px; min-width: 0; }
+  .col + .col { border-left: 1px solid var(--line); }
+  @media (max-width: 1000px) { .col + .col { border-left: 0; border-top: 1px solid var(--line); } }
+
+  .drop {
+    border: 1px dashed var(--line); border-radius: 10px; padding: 22px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: .15s;
+  }
+  .drop:hover, .drop.hot { border-color: var(--accent); color: var(--ink); background: #141824; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  select, input, button {
+    background: #10131a; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 10px; font: inherit;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+  #pages { margin-top: 16px; }
+  .page-wrap { position: relative; }
+  .page-wrap img { display: block; max-width: 100%; border-radius: 6px; border: 1px solid var(--line); }
+  .ov { position: absolute; border-radius: 3px; cursor: pointer; transition: .12s; }
+  .ov.element { border: 1px dashed #3d4657; pointer-events: none; }
+  .ov.ok { border: 2px solid var(--ok); background: rgba(63,185,80,.14); }
+  .ov.bad { border: 2px solid var(--bad); background: rgba(229,83,75,.14); }
+  .ov:hover { background: rgba(76,141,255,.22); }
+
+  .stat { display: flex; gap: 18px; flex-wrap: wrap; margin: 14px 0 4px; }
+  .stat b { display: block; font-size: 20px; font-weight: 650; }
+  .stat span { color: var(--muted); font-size: 12px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .pill {
+    display: inline-block; padding: 1px 7px; border-radius: 999px;
+    font-size: 11.5px; border: 1px solid var(--line);
+  }
+  .pill.ok { color: var(--ok); border-color: #26543a; background: #11231a; }
+  .pill.bad { color: var(--bad); border-color: #5a2a28; background: #241314; }
+  .pill.warn { color: var(--warn); border-color: #4d3d13; background: #221c0d; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .section { margin-top: 26px; }
+  .section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; margin: 0 0 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
+  .card .q { font-size: 13.5px; margin-bottom: 8px; }
+  .card .meta { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
+  .err { color: var(--bad); font-size: 13px; margin-top: 10px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+  .chunk-text { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: #c3c9d6;
+                white-space: pre-wrap; word-break: break-word; max-height: 62px; overflow: hidden; }
+  .spinner { display: none; color: var(--muted); font-size: 13px; }
+  .spinner.on { display: block; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 10px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rag-ingest</h1>
+  <span class="sub">Grounding-gated ingestion — verified chunks enter retrieval, everything else becomes a question</span>
+</header>
+
+<main>
+  <section class="col">
+    <div class="drop" id="drop">
+      Drop a PDF here, or click to choose
+      <input type="file" id="file" accept="application/pdf" hidden>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <select id="parser">
+        <option value="auto">parser: auto</option>
+        <option value="docling">parser: docling</option>
+        <option value="pdfplumber">parser: pdfplumber</option>
+      </select>
+      <span class="spinner" id="spinner">processing…</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="muted" style="font-size:12.5px;display:flex;gap:6px;align-items:center">
+        <input type="checkbox" id="t2toggle" style="width:auto">
+        scripted T2 + force structure-ambiguous
+      </label>
+      <span class="muted" style="font-size:11.5px">
+        (real corpora rarely reach T2 — this is a demo control, not a real defect)
+      </span>
+    </div>
+    <div class="err" id="err"></div>
+
+    <div id="result"></div>
+  </section>
+
+  <aside class="col">
+    <div class="section" style="margin-top:0">
+      <h2>Review queue</h2>
+      <div id="review"></div>
+    </div>
+    <div class="section">
+      <h2>T2 adjudication quality</h2>
+      <div id="scorecard" class="empty">No corrections recorded yet.</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let currentDoc = null;
+
+$('#t2toggle').onchange = async (e) => {
+  const on = e.target.checked;
+  await fetch(`/api/config?t2=${on}&force_ambiguous=${on}`, { method: 'POST' });
+};
+
+/* ---------- upload ---------- */
+const drop = $('#drop'), fileInput = $('#file');
+drop.onclick = () => fileInput.click();
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('hot'); };
+drop.ondragleave = () => drop.classList.remove('hot');
+drop.ondrop = (e) => {
+  e.preventDefault(); drop.classList.remove('hot');
+  if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+};
+fileInput.onchange = () => fileInput.files[0] && upload(fileInput.files[0]);
+
+async function upload(file) {
+  $('#err').textContent = '';
+  $('#spinner').classList.add('on');
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const res = await fetch(`/api/ingest?parser=${encodeURIComponent($('#parser').value)}`, {
+      method: 'POST', body: form,
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const view = await res.json();
+    currentDoc = view.doc_id;
+    // Page numbers and their extents: the overlay needs the size the bbox
+    // coordinates are expressed in, not the image's pixel size.
+    window.__pages = view.pages.map(p => p.page_no);
+    window.__pageSizes = Object.fromEntries(
+      view.pages.map(p => [p.page_no, { w: p.width, h: p.height }])
+    );
+    render(view);
+    await loadOverlay(view.doc_id);
+    await refreshSidebar();
+  } catch (e) {
+    $('#err').textContent = `Ingest failed: ${e.message}`;
+  } finally {
+    $('#spinner').classList.remove('on');
+  }
+}
+
+/* ---------- result panel ---------- */
+function render(view) {
+  const total = view.verified_count + view.quarantined_count;
+  const rate = total ? Math.round(100 * view.verified_count / total) : 0;
+
+  const chunks = view.chunks.map(c => `
+    <tr>
+      <td><span class="pill ${c.verified ? 'ok' : 'bad'}">${c.verified ? 'verified' : 'withheld'}</span></td>
+      <td class="mono">${c.kind}</td>
+      <td class="chunk-text">${esc(c.text)}</td>
+      <td>${c.reason ? `<span class="pill warn">${esc(c.reason)}</span>` : '<span class="muted">—</span>'}</td>
+    </tr>`).join('');
+
+  const tiers = view.tiers.map(t => `
+    <tr>
+      <td class="mono">${esc(t.element_id)}</td>
+      <td><span class="pill ${t.tier === 'extract' ? 'ok' : 'warn'}">${esc(t.tier)}</span></td>
+      <td class="muted mono">${fmtScores(t)}</td>
+      <td class="muted">${esc((t.reasons || []).join(', ') || '—')}</td>
+    </tr>`).join('');
+
+  $('#result').innerHTML = `
+    <div class="stat">
+      <div><b>${rate}%</b><span>verification</span></div>
+      <div><b>${view.verified_count}</b><span>verified chunks</span></div>
+      <div><b>${view.quarantined_count}</b><span>withheld</span></div>
+      <div><b>${view.review_items.length}</b><span>queued questions</span></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:rgba(63,185,80,.5);border:1px solid var(--ok)"></i>verified — enters retrieval</span>
+      <span><i style="background:rgba(229,83,75,.5);border:1px solid var(--bad)"></i>withheld — becomes a question</span>
+      <span><i style="border:1px dashed #3d4657"></i>element box</span>
+    </div>
+    <div id="pages"></div>
+
+    <div class="section">
+      <h2>Chunks</h2>
+      <table><thead><tr><th>verdict</th><th>kind</th><th>text</th><th>reason</th></tr></thead>
+      <tbody>${chunks || '<tr><td colspan="4" class="muted">no chunks</td></tr>'}</tbody></table>
+    </div>
+
+    <div class="section">
+      <h2>Tier routing</h2>
+      <table><thead><tr><th>element</th><th>tier</th><th>scores</th><th>why</th></tr></thead>
+      <tbody>${tiers || '<tr><td colspan="4" class="muted">no elements</td></tr>'}</tbody></table>
+    </div>`;
+}
+
+async function loadOverlay(docId) {
+  const ov = await (await fetch(`/api/overlay/${docId}`)).json();
+  const pages = $('#pages');
+  pages.innerHTML = '';
+  // Page images come from the view we just rendered; ask for each page number.
+  const pageNos = (window.__pages || []);
+  for (const pageNo of pageNos) pages.appendChild(buildPage(docId, pageNo, ov));
+}
+
+function buildPage(docId, pageNo, ov) {
+  const wrap = document.createElement('div');
+  wrap.className = 'page-wrap';
+
+  const img = document.createElement('img');
+  img.src = `/api/page/${docId}/${pageNo}`;
+  img.onerror = () => { wrap.innerHTML = '<div class="empty">No rendered image for this page.</div>'; };
+  img.style.display = 'block';
+
+  img.onload = () => {
+    const size = window.__pageSizes[pageNo] || {};
+    const pageW = size.w || img.naturalWidth;
+    const pageH = size.h || img.naturalHeight;
+
+    const boxes = [
+      ...ov.elements.filter(e => e.page === pageNo).map(e => ({ ...e, kind: 'element' })),
+      ...ov.chunks.filter(c => c.page === pageNo && c.bbox).map(c => ({ ...c, kind: 'chunk' })),
+    ];
+
+    // Letter pages are mostly margin. Crop to the region that actually has
+    // content, otherwise the boxes are a few pixels on a blank sheet and the
+    // demo shows nothing. Overlay coordinates stay in page space and are
+    // offset by the crop origin at draw time.
+    const pad = 36;
+    let cropL = 0, cropT = 0, cropW = pageW, cropH = pageH;
+    if (boxes.length) {
+      const l = Math.min(...boxes.map(b => b.bbox[0]));
+      const t = Math.min(...boxes.map(b => b.bbox[1]));
+      const r = Math.max(...boxes.map(b => b.bbox[2]));
+      const b = Math.max(...boxes.map(b => b.bbox[3]));
+      cropL = Math.max(0, l - pad);
+      cropT = Math.max(0, t - pad);
+      const cropR = Math.min(pageW, r + pad);
+      const cropB = Math.min(pageH, b + pad);
+      cropW = Math.max(1, cropR - cropL);
+      cropH = Math.max(1, cropB - cropT);
+    }
+
+    // Measure the containing column, not the wrapper's parent: #pages shrinks
+    // to its content, so reading its width here is circular and yields ~0.
+    const column = document.querySelector('section.col');
+    const maxW = (column ? column.clientWidth - 48 : 720) || 720;
+    const scale = Math.min(maxW / cropW, 1.6);
+    const outW = cropW * scale;
+    const outH = cropH * scale;
+
+    wrap.style.position = 'relative';
+    wrap.style.width = `${outW}px`;
+    wrap.style.height = `${outH}px`;
+    wrap.style.overflow = 'hidden';
+    wrap.style.borderRadius = '6px';
+    wrap.style.border = '1px solid var(--line)';
+
+    img.style.position = 'absolute';
+    img.style.width = `${pageW * scale}px`;
+    img.style.height = `${pageH * scale}px`;
+    img.style.maxWidth = 'none';
+    img.style.left = `${-cropL * scale}px`;
+    img.style.top = `${-cropT * scale}px`;
+    wrap.appendChild(img);
+
+    for (const box of boxes) {
+      const d = document.createElement('div');
+      if (box.kind === 'element') {
+        d.className = 'ov element';
+        d.title = `element ${box.element_id}`;
+      } else {
+        d.className = `ov ${box.verified ? 'ok' : 'bad'}`;
+        d.title = `${box.verified ? 'verified — enters retrieval' : 'withheld — becomes a question'}`
+          + `${box.reason ? ' (' + box.reason + ')' : ''}\n${box.chunk_id}`;
+      }
+      placeRelative(d, box.bbox, cropL, cropT, scale);
+      wrap.appendChild(d);
+    }
+  };
+  return wrap;
+}
+
+function placeRelative(node, bbox, originLeft, originTop, scale) {
+  const [l, t, r, b] = bbox;
+  node.style.position = 'absolute';
+  node.style.left = `${(l - originLeft) * scale}px`;
+  node.style.top = `${(t - originTop) * scale}px`;
+  node.style.width = `${Math.max(3, (r - l) * scale)}px`;
+  node.style.height = `${Math.max(3, (b - t) * scale)}px`;
+}
+
+/* ---------- sidebar ---------- */
+async function refreshSidebar() {
+  const [review, card] = await Promise.all([
+    (await fetch('/api/review')).json(),
+    (await fetch('/api/scorecard')).json(),
+  ]);
+  renderReview(review.items);
+  renderScorecard(card);
+}
+
+function renderReview(items) {
+  if (!items.length) {
+    $('#review').innerHTML = '<div class="empty">Queue is empty — nothing needs a human.</div>';
+    return;
+  }
+  $('#review').innerHTML = items.map(it => `
+    <div class="card">
+      <div class="meta mono">${esc(it.item_id)} · priority ${it.priority} · <span class="pill warn">${esc(it.reason)}</span></div>
+      <div class="q">${esc(it.question)}</div>
+      ${it.candidate_ids.length ? `
+        <div class="meta">T2 candidates: ${it.candidate_ids.map(esc).join(' / ')}
+        ${it.adjudicated_choice ? ` · picked <span class="mono">${esc(it.adjudicated_choice)}</span>` : ''}</div>
+        <div class="row">
+          <select id="choice-${cssId(it.item_id)}">
+            <option value="">— choose a reading —</option>
+            ${it.candidate_ids.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+          </select>
+          <button onclick="resolveItem('${esc(it.item_id)}', true)">Confirm reading</button>
+        </div>` : `
+        <div class="row">
+          <input id="ans-${cssId(it.item_id)}" placeholder="what is this content?" style="flex:1">
+          <button onclick="resolveItem('${esc(it.item_id)}', false)">Submit</button>
+        </div>`}
+    </div>`).join('');
+}
+
+async function resolveItem(itemId, isChoice) {
+  const box = isChoice
+    ? document.getElementById(`choice-${cssId(itemId)}`)
+    : document.getElementById(`ans-${cssId(itemId)}`);
+  const after = isChoice ? box.value : box.value.trim();
+  if (!after) {
+    // No preselected default: the reviewer must choose. Pre-selecting T2's own
+    // pick would turn "confirm" into a rubber stamp and inflate precision with
+    // agreement the reviewer never actually exercised.
+    $('#err').textContent = isChoice
+      ? 'Choose a reading before confirming.'
+      : 'Describe the content before submitting.';
+    return;
+  }
+  $('#err').textContent = '';
+  const res = await fetch('/api/review', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      item_id: itemId,          // ids contain ':' and '/' -- never path-encode them
+      after,
+      choice: isChoice ? after : null,
+      role: 'owner',
+    }),
+  });
+  if (!res.ok) { $('#err').textContent = `Review failed: ${(await res.json()).detail}`; return; }
+  renderScorecard(await res.json());
+  await refreshSidebar();
+  // The "queued questions" counter lives in the result panel and would
+  // otherwise keep showing the pre-resolution number.
+  if (currentDoc) {
+    const view = await (await fetch(`/api/view/${currentDoc}`)).json();
+    refreshCounters(view);
+  }
+}
+
+function renderScorecard(c) {
+  if (!c.scored && !c.excluded) {
+    $('#scorecard').innerHTML = '<div class="empty">No corrections recorded yet.</div>';
+    return;
+  }
+  const pct = (v) => v == null ? 'n/a' : `${Math.round(v * 100)}%`;
+  const b = c.breaker;
+  $('#scorecard').innerHTML = `
+    <table>
+      <tr><th>scored</th><td>${c.scored} <span class="muted">(${c.excluded} excluded)</span></td></tr>
+      <tr><th>picks</th><td>${c.picks} <span class="muted">· ${c.abstentions} abstentions</span></td></tr>
+      <tr><th>precision</th><td>${pct(c.precision)}</td></tr>
+      <tr><th>coverage</th><td>${pct(c.coverage)}</td></tr>
+      <tr><th>harm rate</th><td>${pct(c.harm_rate)}</td></tr>
+    </table>
+    <div class="card" style="margin-top:10px">
+      <div class="meta">verdict</div>
+      <div>${esc(c.verdict)}</div>
+      ${b ? `<div class="meta" style="margin-top:8px">breaker
+        <span class="pill ${b.state === 'closed' ? 'ok' : 'bad'}">${esc(b.state)}</span>
+        ${b.trip_reason !== 'none' ? `· ${esc(b.trip_reason)}` : ''}
+        · ${b.labels_seen} labels</div>` : ''}
+    </div>`;
+}
+
+/* ---------- helpers ---------- */
+function refreshCounters(view) {
+  const total = view.verified_count + view.quarantined_count;
+  const rate = total ? Math.round(100 * view.verified_count / total) : 0;
+  const b = document.querySelectorAll('.stat b');
+  if (b.length >= 4) {
+    b[0].textContent = `${rate}%`;
+    b[1].textContent = view.verified_count;
+    b[2].textContent = view.quarantined_count;
+    b[3].textContent = view.review_items.filter(i => !i.resolved).length;
+  }
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, m =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+function cssId(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, '_'); }
+function fmtScores(t) {
+  const f = (v) => v == null ? '—' : v.toFixed(2);
+  return `layout ${f(t.layout_score)} · ocr ${f(t.ocr_score)} · parse ${f(t.parse_score)}`;
+}
+</script>
+</body>
+</html>

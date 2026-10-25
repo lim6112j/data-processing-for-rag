@@ -1,7 +1,8 @@
 # rag-ingest
 
-**Status:** working prototype. 265 tests, 93% coverage, runs real PDFs end-to-end
-through Docling + pdfplumber with OpenRouter as the adjudication backend.
+**Status:** working prototype. 292 tests, 93% coverage, runs real PDFs end-to-end
+through Docling + pdfplumber with OpenRouter as the adjudication backend, and
+ships an interactive demo server.
 
 ## Summary
 
@@ -39,11 +40,53 @@ it stops being right.
 | T3 | Chunk-scoped review queue with owner-correction labels |
 
 ```bash
-uv run pytest                          # 265 tests, no network
+uv run pytest                          # 292 tests, no network
+uv run rag-demo                        # interactive UI on :8765
 uv run rag-goldset                     # decision-level gold set (6/6)
 uv run rag-goldset --corpus ./pdfs     # real PDFs, per-document accounting
 uv run rag-goldset --score labels.json # is T2 still trustworthy?
 ```
+
+### The demo
+
+`uv run rag-demo` serves a UI at `http://127.0.0.1:8765` (override with
+`RAG_DEMO_PORT`). Drop a PDF and it shows the verdict rather than the result:
+page image with **green boxes** on regions that entered retrieval and **red
+boxes** on regions withheld, each chunk's tier route with its scores, and the
+review queue on the right.
+
+The withheld box lands exactly on the damaged characters, which is the point —
+you can see `l,234.56` and watch the gate refuse to turn it into `1,234.56`.
+
+```bash
+uv run rag-demo
+# then drag an invoice PDF onto the page
+```
+
+Two things in the demo deserve honest labelling:
+
+- **The "scripted T2" switch is a demo control, not a simulation of a defect.**
+  Real corpora rarely reach T2: pdfplumber reports no scores and Docling's
+  layout scores on readable pages sit above the threshold, so
+  `STRUCTURE_UNKNOWN` does not fire. The switch lowers the layout score so the
+  branch is reachable, and the scripted adjudicator picks by name rather than
+  judging — it demonstrates the *shape* of the path, not that T2 works.
+- **The review dropdown has no preselected default.** Pre-selecting T2's own
+  pick would turn "confirm" into a rubber stamp and inflate precision with
+  agreement the reviewer never actually exercised.
+
+The UI itself was verified in a browser, not just via `TestClient`; the
+screenshots below are from that run.
+
+| Case | Result |
+|---|---|
+| Readable invoice | 100% verified, green box, empty queue |
+| OCR-damaged (`l,234.56`) | 0% verified, red box, queued as `incomplete_extraction` |
+| T2 enabled | two candidates shown, pick recorded, **still withheld** until confirmed |
+| After confirming | precision 100%, breaker `closed`, queue 2 → 1 |
+
+`tests/test_demo.py` covers the parts that break silently: routing, item-id
+handling, and the review loop's effect on the scorecard.
 
 ### What it does not do yet
 
@@ -54,7 +97,8 @@ uv run rag-goldset --score labels.json # is T2 still trustworthy?
   disagreement, which is the honest answer but means its precision is unmeasured
   outside the example label set.
 - **No vector store, no persistence.** Policies are implemented; storage backends
-  are not.
+  are not. The demo holds one in-memory session for the whole process, so
+  concurrent visitors share a review queue.
 
 Details for each of these are in *Known limitations* and *Deliberate non-goals*
 below.
@@ -391,20 +435,28 @@ src/rag_ingest/
   pipeline.py     T0 -> T1 -> T2 -> quarantine orchestration
   goldset.py      gold-set loader, replay extractor, decision checker
   cli.py          `rag-goldset`
-tests/            265 tests, 93% coverage
+  demo/
+    server.py       FastAPI routes: ingest, overlay, page image, review
+    session.py      per-session state and view models
+    parsing.py      parser selection (same rules as the CLI)
+    producers.py    scripted second reading, so T2 is reachable in a demo
+    fake_adjudicator.py  scripted T2 -- shape of the path, not judgement
+    static/index.html    the UI
+tests/            292 tests, 93% coverage
 goldset/cases.yaml  adversarial cases, each asserting a decision
 ```
 
 ## Run it
 
 ```bash
-uv run pytest                                 # 265 tests
+uv run pytest                                 # 292 tests
 uv run pytest -m live                         # one real OpenRouter call
 uv run pytest --cov=rag_ingest                # coverage
 uv run rag-goldset                            # gold-set report
 uv run rag-goldset --score LABELS.json        # T2 precision / coverage / harm
 uv run rag-goldset --corpus DIR               # batch a real PDF directory
 uv run rag-goldset path/to/cases.yaml
+uv run rag-demo                               # interactive demo on :8765
 uv run ruff check src tests
 ```
 

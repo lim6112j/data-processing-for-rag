@@ -1,0 +1,218 @@
+"""Demo server: upload a PDF, watch it go through the cascade.
+
+Route shape follows the thing being demonstrated, not REST convention:
+
+  POST /api/ingest            upload -> a verdict per chunk, a tier per element
+  GET  /api/page/{doc}/{n}    the page image the overlay is drawn on
+  GET  /api/overlay/{doc}     chunk boxes with verdicts
+  GET  /api/review            open review items, highest priority first
+  POST /api/review/{id}       record a correction, return the new T2 scorecard
+  GET  /api/scorecard         T2 precision / coverage / harm + breaker state
+
+Run:  uv run rag-demo      then open http://127.0.0.1:8000
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, Response
+from pydantic import BaseModel, Field
+
+from rag_ingest.demo.session import DemoSession
+
+app = FastAPI(title="rag-ingest demo", version="0.1.0")
+
+#: One session for the whole process. A demo, not a service: concurrent users
+#: would share a review queue, which is either fine for a walkthrough or the
+#: exact thing you would change first in a real deployment.
+_session = DemoSession()
+
+
+class ReviewRequest(BaseModel):
+    """A correction. The item id travels here, not in the URL.
+
+    Chunk ids contain ``:`` and ``/`` (e.g. ``doc:table:#/tables/0``); a path
+    parameter cannot carry those reliably, which made every Submit return 404.
+    """
+
+    item_id: str = Field(min_length=1)
+    after: str = Field(min_length=1)
+    choice: str | None = None
+    role: str = "owner"
+
+
+def _configure_t2(enabled: bool) -> None:
+    """Attach or detach a scripted T2.
+
+    Off by default, because with no second parse configured there is genuine
+    disagreement to adjudicate and a T2 that fires anyway would be theatre.
+    When on, the producer supplies two readings so the branch is reachable.
+    """
+    from rag_ingest.demo.fake_adjudicator import ScriptedAdjudicator
+    from rag_ingest.demo.producers import DoubleReadingProducer
+
+    if not enabled:
+        # Clear both: an adjudicator with no producer is inert, and a producer
+        # with no adjudicator would raise into an abstention. They are a pair.
+        _session.adjudicator = None
+        _session.producer = None
+        return
+
+    _session.adjudicator = ScriptedAdjudicator(prefer="pdfplumber")
+    _session.producer = DoubleReadingProducer()
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/config")
+def config() -> dict:
+    return {
+        "t2_enabled": _session.adjudicator is not None,
+        "force_ambiguous": _session.force_structure_ambiguous,
+    }
+
+
+@app.post("/api/config")
+def set_config(t2: bool = False, force_ambiguous: bool = False) -> dict:
+    _configure_t2(t2)
+    _session.force_structure_ambiguous = force_ambiguous
+    return {"t2_enabled": t2, "force_ambiguous": force_ambiguous}
+
+
+@app.post("/api/ingest")
+async def ingest(file: UploadFile = File(...), parser: str = "auto") -> dict:
+    """Parse an uploaded PDF and run it through the cascade."""
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(400, "empty upload")
+
+    doc_id = Path(file.filename or "document").stem
+    suffix = Path(file.filename or "x.pdf").suffix or ".pdf"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+        handle.write(payload)
+        temp_path = Path(handle.name)
+
+    try:
+        from rag_ingest.demo.parsing import parse_pdf
+
+        raw, elements, resolved_parser = parse_pdf(temp_path, doc_id=doc_id, parser=parser)
+    except Exception as exc:  # a bad upload must not 500 the demo
+        raise HTTPException(422, f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    view = _session.ingest(
+        doc_id=doc_id,
+        filename=file.filename or doc_id,
+        parser=resolved_parser,
+        raw=raw,
+        elements=elements,
+    )
+    return view.model_dump(mode="json")
+
+
+@app.get("/api/page/{doc_id}/{page_no}")
+def page_image(doc_id: str, page_no: int) -> Response:
+    image = _session.page_image(doc_id, page_no)
+    if image is None:
+        raise HTTPException(404, "no rendered image for that page")
+    return Response(content=image, media_type="image/png")
+
+
+@app.get("/api/view/{doc_id}")
+def view(doc_id: str) -> dict:
+    """The stored ingest view, with review items re-read from the live queue.
+
+    Re-reading matters: the stored view is a snapshot, so an item resolved since
+    ingestion would still show as pending and the counters would drift.
+    """
+    stored = _session.views.get(doc_id)
+    if stored is None:
+        raise HTTPException(404, "unknown document")
+    payload = stored.model_dump(mode="json")
+    closed = {item.chunk_id for item in _session.queue.items_by_chunk().values() if item.resolved}
+    payload["review_items"] = [
+        {**item, "resolved": item["chunk_id"] in closed} for item in payload["review_items"]
+    ]
+    return payload
+
+
+@app.get("/api/overlay/{doc_id}")
+def overlay(doc_id: str) -> dict:
+    return _session.overlay(doc_id)
+
+
+@app.get("/api/review")
+def review_items() -> dict:
+    return {"items": [item.model_dump(mode="json") for item in _session.fresh_review_items()]}
+
+
+@app.post("/api/review")
+def resolve(body: ReviewRequest) -> dict:
+    # The parameter must not be named ``request``: FastAPI would inject the
+    # Starlette Request object there instead of parsing the model, and every
+    # call would fail with a 422 asking for a ``request`` query parameter.
+    from rag_ingest.escalation import ReviewerRole
+
+    try:
+        role = ReviewerRole(body.role)
+    except ValueError as exc:
+        raise HTTPException(400, f"unknown role {body.role!r}") from exc
+
+    try:
+        card = _session.resolve(
+            body.item_id,
+            after=body.after,
+            choice=body.choice,
+            reviewer_role=role,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    return _scorecard_payload(card)
+
+
+@app.get("/api/scorecard")
+def scorecard() -> dict:
+    return _scorecard_payload(_session.scorecard())
+
+
+def _scorecard_payload(card) -> dict:
+    breaker = _session.breaker_status()
+    return {
+        "scored": card.total_scored,
+        "excluded": card.excluded,
+        "picks": card.picks,
+        "abstentions": card.abstentions,
+        "precision": card.precision,
+        "coverage": card.coverage,
+        "harm_rate": card.harm_rate,
+        "verdict": card.verdict(),
+        "breaker": None
+        if breaker is None
+        else {
+            "state": breaker.state.value,
+            "trip_reason": breaker.trip_reason.value,
+            "labels_seen": breaker.labels_seen,
+        },
+    }
+
+
+def main() -> None:  # pragma: no cover - process entry point
+    import os
+
+    import uvicorn
+
+    # 8000 is commonly taken by other dev servers; allow an override.
+    port = int(os.environ.get("RAG_DEMO_PORT", "8765"))
+    uvicorn.run(app, host="127.0.0.1", port=port)
+
+
+__all__ = ["app", "main"]
