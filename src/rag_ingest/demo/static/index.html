@@ -394,7 +394,9 @@ function renderReview(items) {
           <button onclick="resolveItem('${esc(it.item_id)}', true)">Confirm reading</button>
         </div>` : `
         <div class="row">
-          <input id="ans-${cssId(it.item_id)}" placeholder="what is this content?" style="flex:1">
+          <input id="ans-${cssId(it.item_id)}"
+                 placeholder="keep / discard — and what to extract"
+                 style="flex:1">
           <button onclick="resolveItem('${esc(it.item_id)}', false)">Submit</button>
         </div>`}
     </div>`).join('');

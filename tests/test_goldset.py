@@ -201,3 +201,69 @@ class TestReviewQuestionWording:
             queue.enqueue(review_item)
 
         assert "under 'Invoices'" in queue.open_items()[0].question
+
+
+class TestUnclassifiedQuestion:
+    """An unclassified question must be answerable.
+
+    It used to read "What is the content? It matched no known document type." --
+    which does not say what kind of answer is wanted, and every unclassified
+    chunk in a document produced the *same* words, so the reviewer could not tell
+    which region they were being asked about.
+    """
+
+    def _questions(self, *texts):
+        from rag_ingest.docmodel import Element, ElementKind, RawDocument
+        from rag_ingest.escalation import ReviewQueue
+        from rag_ingest.extractors import TemplateExtractor
+        from rag_ingest.pipeline import IngestPipeline
+
+        raw, elements = RawDocument.from_elements(
+            "d1",
+            [
+                Element(
+                    element_id=f"e{i}",
+                    kind=ElementKind.TABLE if "|" in text else ElementKind.PARAGRAPH,
+                    page=1,
+                    text=text,
+                    table_rows=(("Item", "Amount"), ("Widget", "1200")) if "|" in text else None,
+                )
+                for i, text in enumerate(texts)
+            ],
+        )
+        queue = ReviewQueue()
+        outcome = IngestPipeline(queue, TemplateExtractor(), today=TODAY).ingest(
+            raw, elements, owner_id="o"
+        )
+        for item in outcome.review_items:
+            queue.enqueue(item)
+        return [item.question for item in queue.open_items()]
+
+    def test_question_states_what_was_observed(self):
+        questions = self._questions("Item | Amount\nWidget | 1200")
+
+        assert "looks tabular" in questions[0]
+
+    def test_question_includes_a_snippet_of_the_region(self):
+        questions = self._questions("Item | Amount\nWidget | 1200")
+
+        assert "Widget" in questions[0]
+
+    def test_question_asks_for_a_decision_not_a_description(self):
+        questions = self._questions("Quarterly report")
+
+        assert "worth keeping" in questions[0]
+
+    def test_two_unclassified_chunks_get_distinguishable_questions(self):
+        questions = self._questions(
+            "Item | Amount\nWidget | 1200",
+            "Quarterly report\nItem Amount Widget 1200",
+        )
+
+        assert len(questions) == 2
+        assert questions[0] != questions[1]
+
+    def test_question_does_not_say_only_that_it_matched_nothing(self):
+        questions = self._questions("Quarterly report")
+
+        assert "What is the content?" not in questions[0]

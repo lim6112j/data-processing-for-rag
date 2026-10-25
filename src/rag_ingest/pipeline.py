@@ -277,10 +277,9 @@ class IngestPipeline:
             or result is None
             or result.status is GroundingStatus.UNCLASSIFIED
         ):
-            where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
             return (
                 EscalationReason.UNCLASSIFIED,
-                f"What is the content{where}? It matched no known document type.",
+                _unclassified_question(chunk, extraction),
                 (),
             )
 
@@ -392,6 +391,36 @@ def _incomplete_question(
     if absent:
         question += " For the missing fields, what should they be?"
     return question
+
+
+def _unclassified_question(chunk: Chunk, extraction: Extraction | None) -> str:
+    """Ask a question the reviewer can actually answer.
+
+    "What is the content?" does not say what kind of answer is wanted, and two
+    unclassified chunks in the same document produced identical questions --
+    the reviewer could not tell which region they were being asked about.
+
+    So this states what was observed (the shape the extractor noticed, the kind
+    of chunk, a snippet), names the region, and offers the two answers that are
+    actually useful: describe the type, or transcribe the text.
+    """
+    observed = getattr(extraction, "observed_shape", None)
+    snippet = " ".join(chunk.text.split())[:120]
+    kind = chunk.kind.value
+
+    seen = []
+    if observed and observed not in ("prose", "empty"):
+        seen.append(f"looks {observed.replace('_', ' ')}")
+    seen.append(f"is treated as a {kind} block")
+    where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
+    on_page = f" on page {chunk.page_start}" if chunk.page_start > 1 else ""
+
+    return (
+        f"Unrecognised content{where}{on_page}: \"{snippet}\" "
+        f"({' and '.join(seen)}). "
+        "Is this content worth keeping in the knowledge base, and if so, "
+        "what should be extracted from it?"
+    )
 
 
 def _field_names(extraction: Extraction | None) -> list[str]:
