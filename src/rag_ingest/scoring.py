@@ -175,8 +175,15 @@ def score(
             continue
 
         item = review_items.get(correction.chunk_id)
-        candidate_ids = tuple(getattr(item, "candidate_ids", ()) or ())
-        adjudicated = getattr(item, "adjudicated_choice", None)
+        # Prefer what the label carries. The review item is a fallback for
+        # corrections captured before labels were self-contained, and may be
+        # gone entirely after a re-ingest.
+        candidate_ids = correction.candidate_ids or tuple(
+            getattr(item, "candidate_ids", ()) or ()
+        )
+        adjudicated = correction.adjudication_choice or getattr(
+            item, "adjudicated_choice", None
+        )
 
         if not candidate_ids:
             excluded += 1

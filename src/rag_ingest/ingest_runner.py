@@ -242,6 +242,10 @@ class IngestRunner:
         self.store.add_raw(source.raw)
         for record in outcome.verified_chunks + outcome.quarantined_chunks:
             self.store.add(record)
+        # A re-run of the same document yields the same item ids. Drop the
+        # previous run's items rather than tripping the duplicate guard; their
+        # corrections are the labels and are kept.
+        self.queue.discard(source.doc_id)
         for item in outcome.review_items:
             self.queue.enqueue(item)
 

@@ -147,6 +147,12 @@ class DemoSession:
                 raw, elements, owner_id="demo-owner", retrieval_demand=5
             )
 
+        # Re-uploading the same file produces the same doc_id, hence the same
+        # chunk ids, hence the same item ids. Drop the previous parse's items
+        # first: they describe a document state that no longer exists. Their
+        # corrections survive -- those are the labels.
+        self.queue.discard(doc_id)
+
         # The pipeline *produces* review items; enqueueing is the caller's job
         # (IngestRunner does the same). Omitting it leaves the review queue
         # empty while the view still lists items -- the loop would look alive

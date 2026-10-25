@@ -347,3 +347,167 @@ class TestT2DemoSwitch:
 
 def test_incomplete_status_exists():
     assert GroundingStatus.INCOMPLETE.value == "incomplete"
+
+
+class TestReingest:
+    """Re-uploading the same file must not 500.
+
+    Item ids derive from doc_id + chunk id, so a second parse produced identical
+    ids and tripped the queue's duplicate guard. That was a real server error.
+    """
+
+    def _ingest(self, session, doc_id="damaged"):
+        raw, elements = _source("Invoice INV-3003 total l,234.56 USD", doc_id=doc_id)
+        return session.ingest(
+            doc_id=doc_id, filename="d.pdf", parser="test", raw=raw, elements=elements
+        )
+
+    def test_second_ingest_does_not_raise(self):
+        session = DemoSession(today=TODAY)
+
+        self._ingest(session)
+        self._ingest(session)  # must not raise
+
+        assert len(session.open_items()) == 1
+
+    def test_reingest_replaces_stale_questions(self):
+        session = DemoSession(today=TODAY)
+
+        first = self._ingest(session)
+        second = self._ingest(session)
+
+        assert first.review_items[0].item_id == second.review_items[0].item_id
+        assert len(session.open_items()) == 1
+
+    def test_resolved_label_survives_reingest(self):
+        session = DemoSession(today=TODAY)
+        self._ingest(session)
+        session.resolve(session.open_items()[0].item_id, after="1234.56")
+
+        self._ingest(session)
+
+        assert len(session.queue.labels()) == 1
+
+    def test_collected_labels_stay_scorable_after_the_item_is_gone(self):
+        # Items are discarded on re-ingest; a label that needs the item to be
+        # scored is not a label.
+        from rag_ingest.demo.fake_adjudicator import ScriptedAdjudicator
+        from rag_ingest.demo.producers import DoubleReadingProducer
+
+        session = DemoSession(
+            adjudicator=ScriptedAdjudicator(prefer="pdfplumber"),
+            producer=DoubleReadingProducer(),
+            force_structure_ambiguous=True,
+            today=TODAY,
+        )
+        self._ingest(session)
+        item = session.open_items()[0]
+        session.resolve(
+            item.item_id, after=item.adjudicated_choice, choice=item.adjudicated_choice
+        )
+        before = session.scorecard()
+
+        self._ingest(session)
+        after = session.scorecard()
+
+        assert before.total_scored == 1
+        assert after.total_scored == 1
+        assert after.precision == before.precision
+
+
+class TestStructureAndIncompleteCoexist:
+    """The two escalation reasons are not mutually exclusive.
+
+    A chunk with unreliable layout very often also has an incomplete extraction.
+    An earlier ordering let INCOMPLETE win outright, which made the T2 branch
+    unreachable -- a regression that no existing test caught.
+    """
+
+    def _session(self):
+        from rag_ingest.demo.fake_adjudicator import ScriptedAdjudicator
+        from rag_ingest.demo.producers import DoubleReadingProducer
+
+        return DemoSession(
+            adjudicator=ScriptedAdjudicator(prefer="pdfplumber"),
+            producer=DoubleReadingProducer(),
+            force_structure_ambiguous=True,
+            today=TODAY,
+        )
+
+    def test_t2_is_reachable_when_extraction_is_also_incomplete(self):
+        session = self._session()
+        raw, elements = _source("Invoice INV-3003 total l,234.56 USD")
+
+        view = session.ingest(
+            doc_id="d1", filename="d.pdf", parser="test", raw=raw, elements=elements
+        )
+
+        item = view.review_items[0]
+        assert item.reason == "structure_ambiguous"
+        assert item.candidate_ids
+        assert item.adjudicated_choice is not None
+
+    def test_incomplete_detail_is_kept_in_the_structural_question(self):
+        session = self._session()
+        raw, elements = _source("Invoice INV-3003 total l,234.56 USD")
+
+        view = session.ingest(
+            doc_id="d1", filename="d.pdf", parser="test", raw=raw, elements=elements
+        )
+
+        question = view.review_items[0].question
+        assert "Two parsers read it differently" in question
+        assert "could not read total amount" in question
+
+    def test_grounding_mismatch_still_never_reaches_t2(self):
+        from rag_ingest.adjudication import AdjudicationDecision
+        from rag_ingest.docmodel import Element, ElementKind, ProvenanceRef, RawDocument
+        from rag_ingest.ontology import AbstainReason, FieldAbstention, FieldValue, InvoiceHeader
+
+        class _Recorder:
+            def __init__(self):
+                self.calls = 0
+
+            def adjudicate_with_evidence(self, question, *, image_png):
+                self.calls += 1
+                return AdjudicationDecision(kind="pick", choice_index=0)
+
+        class _Liar:
+            def extract(self, chunk):
+                ref = ProvenanceRef(page=1, char_start=0, char_end=len(chunk.text))
+                return InvoiceHeader(
+                    invoice_number=FieldValue(value="INV-1", provenance=ref),
+                    issue_date=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
+                    total_amount=FieldValue(value="9999.99", provenance=ref),
+                    currency=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
+                )
+
+        from rag_ingest.demo.producers import DoubleReadingProducer
+
+        recorder = _Recorder()
+        raw, elements = RawDocument.from_elements(
+            "d1",
+            [
+                Element(
+                    element_id="e1",
+                    kind=ElementKind.PARAGRAPH,
+                    page=1,
+                    text="Invoice INV-1 total 10.00",
+                    bbox=(0.0, 0.0, 100.0, 20.0),
+                )
+            ],
+        )
+        session = DemoSession(
+            extractor=_Liar(),
+            adjudicator=recorder,
+            producer=DoubleReadingProducer(),
+            force_structure_ambiguous=True,
+            today=TODAY,
+        )
+
+        view = session.ingest(
+            doc_id="d1", filename="d.pdf", parser="test", raw=raw, elements=elements
+        )
+
+        assert recorder.calls == 0
+        assert view.review_items[0].reason == "ungrounded"

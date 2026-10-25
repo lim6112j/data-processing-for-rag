@@ -106,6 +106,11 @@ class Correction(BaseModel):
     captured_on: date
     #: The candidate id T2 selected, if it selected one for this chunk.
     adjudication_choice: str | None = None
+    #: The candidates that were on offer. Stored on the label rather than looked
+    #: up from the review item: items are discarded when a document is
+    #: re-ingested, and a label that cannot be scored without them is not a
+    #: label. This is what makes the eval set durable.
+    candidate_ids: tuple[str, ...] = ()
 
     @property
     def is_authoritative(self) -> bool:
@@ -146,6 +151,25 @@ class ReviewQueue:
         self._items[item.item_id] = item
         return True
 
+    def discard(self, doc_id: str) -> int:
+        """Drop every item for a document. Returns how many.
+
+        Used when a document is re-ingested. Item ids are derived from
+        doc_id + chunk id, so a second parse produces the *same* ids and would
+        otherwise trip the duplicate guard -- that was a real 500 on re-upload.
+
+        Resolved items go too, because the item objects describe a parse that no
+        longer exists. Their **corrections are kept**: those are the labels, and
+        `Correction` records both T2's pick and the owner's answer, so the label
+        stays scorable without the item.
+        """
+        stale = [
+            item_id for item_id, item in self._items.items() if item.doc_id == doc_id
+        ]
+        for item_id in stale:
+            del self._items[item_id]
+        return len(stale)
+
     def open_items(self) -> list[ReviewItem]:
         return [item for item in self._items.values() if not item.resolved]
 
@@ -172,10 +196,13 @@ class ReviewQueue:
         if correction.chunk_id != item.chunk_id:
             raise ValueError("correction does not belong to this review item's chunk")
 
+        annotate: dict[str, object] = {}
         if correction.adjudication_choice is None and item.adjudicated_choice is not None:
-            correction = correction.model_copy(
-                update={"adjudication_choice": item.adjudicated_choice}
-            )
+            annotate["adjudication_choice"] = item.adjudicated_choice
+        if not correction.candidate_ids and item.candidate_ids:
+            annotate["candidate_ids"] = item.candidate_ids
+        if annotate:
+            correction = correction.model_copy(update=annotate)
 
         self._items[item_id] = item.model_copy(update={"resolved": True})
         self._corrections.append(correction)

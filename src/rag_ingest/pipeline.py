@@ -213,79 +213,25 @@ class IngestPipeline:
         retrieval_demand: int,
         structure_ambiguous: bool = False,
     ) -> ReviewItem:
-        # Precedence matters. Grounding mismatch is terminal and always wins:
-        # it must never reach T2. Structural ambiguity comes next, because a
-        # chunk whose layout is unreliable has no trustworthy "no known type"
-        # reading either -- T2 may still be able to settle it from the image.
-        if result is not None and result.status is GroundingStatus.MISMATCH:
-            reason = EscalationReason.UNGROUNDED
-            bad = ", ".join(
-                issue.field for issue in result.issues if issue.status is GroundingStatus.MISMATCH
-            )
-            question = (
-                f"The extracted value for {bad} does not appear in the source. "
-                "What should it be?"
-            )
-            issues = result.issues
-        elif result is not None and result.status is GroundingStatus.INCOMPLETE:
-            reason = EscalationReason.INCOMPLETE_EXTRACTION
-            issue_by_field = {
-                issue.field: issue
-                for issue in result.issues
-                if issue.status is GroundingStatus.ABSTAINED
-            }
-            # "Not legible" and "not present" need different actions from the
-            # reviewer: one is a re-scan, the other is new information. Collapsing
-            # them into "missing" told them nothing about what to do.
-            illegible = [
-                name for name in issue_by_field if "illegible" in issue_by_field[name].message
-            ]
-            absent = [name for name in issue_by_field if name not in illegible]
-            found = [
-                name
-                for name in _field_names(extraction)
-                if name not in issue_by_field
-            ]
+        # Two questions are being asked of the reviewer here, and they are not
+        # mutually exclusive: a chunk whose layout is unreliable very often also
+        # yields an incomplete extraction. So this builds a *grounding* verdict
+        # first, then promotes it to a structural one when T2 has something to
+        # settle -- carrying the grounding detail into the question rather than
+        # discarding it.
+        #
+        # MISMATCH is the one terminal case: it must never reach T2, because a
+        # model told "this value failed provenance" invents a plausible span.
+        reason, question, issues = self._grounding_verdict(chunk, extraction, result)
 
-            parts = []
-            where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
-            if found:
-                parts.append(f"read {_join(found)}")
-            if illegible:
-                parts.append(f"could not read {_join(illegible)} (damaged or illegible)")
-            if absent:
-                parts.append(f"did not find {_join(absent)}")
-
-            question = (
-                f"Partially read the record{where}: " + "; ".join(parts) + "."
-            )
-            if illegible:
-                question += (
-                    " For the damaged fields, is a clearer scan available,"
-                    " and what are the correct values?"
-                )
-            if absent:
-                question += " For the missing fields, what should they be?"
-            issues = result.issues
-        elif structure_ambiguous:
-            # Structural conflict -- the one case T2 exists for.
+        if structure_ambiguous and reason is not EscalationReason.UNGROUNDED:
+            detail = question
             reason = EscalationReason.STRUCTURE_AMBIGUOUS
+            where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
             question = (
-                f"How is the content under '{chunk.heading_path}' structured? "
-                "Two parsers read it differently."
+                f"How is the content{where} structured? Two parsers read it differently. "
+                f"{detail}"
             )
-            issues = result.issues if result is not None else ()
-        elif extraction is None or result is None or result.status is GroundingStatus.UNCLASSIFIED:
-            reason = EscalationReason.UNCLASSIFIED
-            question = (
-                f"What is the content under '{chunk.heading_path}'? "
-                "It matched no known document type."
-            )
-            issues = ()
-        else:
-            reason = EscalationReason.LOW_CONFIDENCE
-            question = f"Please confirm the extracted fields for '{chunk.heading_path}'."
-            issues = result.issues
 
         return ReviewItem(
             item_id=f"{chunk.doc_id}:{chunk.chunk_id}",
@@ -297,6 +243,52 @@ class IngestPipeline:
             owner_id=owner_id,
             created_on=self._today,
             retrieval_demand=retrieval_demand,
+        )
+
+    def _grounding_verdict(
+        self,
+        chunk: Chunk,
+        extraction: Extraction | None,
+        result: GroundingResult | None,
+    ) -> tuple[EscalationReason, str, tuple]:
+        """Reason, question and issues from the grounding outcome alone."""
+        if result is not None and result.status is GroundingStatus.MISMATCH:
+            bad = ", ".join(
+                issue.field
+                for issue in result.issues
+                if issue.status is GroundingStatus.MISMATCH
+            )
+            return (
+                EscalationReason.UNGROUNDED,
+                f"The extracted value for {bad} does not appear in the source. "
+                "What should it be?",
+                result.issues,
+            )
+
+        if result is not None and result.status is GroundingStatus.INCOMPLETE:
+            return (
+                EscalationReason.INCOMPLETE_EXTRACTION,
+                _incomplete_question(chunk, extraction, result),
+                result.issues,
+            )
+
+        if (
+            extraction is None
+            or result is None
+            or result.status is GroundingStatus.UNCLASSIFIED
+        ):
+            where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
+            return (
+                EscalationReason.UNCLASSIFIED,
+                f"What is the content{where}? It matched no known document type.",
+                (),
+            )
+
+        where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
+        return (
+            EscalationReason.LOW_CONFIDENCE,
+            f"Please confirm the extracted fields{where}.",
+            result.issues,
         )
 
     def _adjudication_question(
@@ -362,6 +354,44 @@ class IngestPipeline:
                 reason=AbstainReason.AMBIGUOUS,
                 rationale=f"T2 failed: {type(exc).__name__}",
             )
+
+
+def _incomplete_question(
+    chunk: Chunk, extraction: Extraction | None, result: GroundingResult
+) -> str:
+    """State what was read, what was unreadable, and what was absent.
+
+    "Not legible" and "not present" call for different actions: one is a
+    re-scan, the other is new information. Collapsing them into a single
+    "missing" list told the reviewer nothing about what to do.
+    """
+    issue_by_field = {
+        issue.field: issue
+        for issue in result.issues
+        if issue.status is GroundingStatus.ABSTAINED
+    }
+    illegible = [name for name in issue_by_field if "illegible" in issue_by_field[name].message]
+    absent = [name for name in issue_by_field if name not in illegible]
+    found = [name for name in _field_names(extraction) if name not in issue_by_field]
+
+    parts = []
+    where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
+    if found:
+        parts.append(f"read {_join(found)}")
+    if illegible:
+        parts.append(f"could not read {_join(illegible)} (damaged or illegible)")
+    if absent:
+        parts.append(f"did not find {_join(absent)}")
+
+    question = f"Partially read the record{where}: " + "; ".join(parts) + "."
+    if illegible:
+        question += (
+            " For the damaged fields, is a clearer scan available,"
+            " and what are the correct values?"
+        )
+    if absent:
+        question += " For the missing fields, what should they be?"
+    return question
 
 
 def _field_names(extraction: Extraction | None) -> list[str]:
