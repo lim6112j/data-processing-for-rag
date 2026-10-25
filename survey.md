@@ -770,3 +770,180 @@ implying consensus exists.
 | "Precision 0.85+ is the bar" | Human edit systems run at **20–30% hit rate**. 0.85 is not the industry bar; it is an aspiration that must be earned per class. |
 | "Cascades are safe once calibrated" | Routing silently stops escalating under distribution shift (arXiv:2608.17711). |
 | "temperature=0 gives reproducible gates" | Measured run-to-run accuracy variance up to 15%, gaps up to 70% (Eval4NLP 2025). |
+
+---
+
+# Appendix: design discussion, October 2026
+
+Everything above is literature. This appendix records the conclusions drawn
+from it while building this repo, including the parts that are opinion rather
+than evidence, and one measurement that has **not been run yet**.
+
+## The open question: should knowledge and DB-bound content be cleaned to different standards?
+
+The proposal was: general knowledge can tolerate some error and still be useful
+in RAG; content destined for a database must be strictly verified. Only the
+second should be held to a high bar.
+
+### Finding that prompted it: the current gate rejects knowledge outright
+
+Measured directly against the code, not inferred:
+
+```
+document: "Photosynthesis converts light energy into chemical energy in plants..."
+result:   verified 0  |  quarantined 1  |  reason: unclassified
+RAG search for "photosynthesis": []
+```
+
+`TemplateExtractor` knows one invoice shape, so ordinary prose becomes
+`unclassified` and is withheld. The system does not "strictly clean DB content
+while admitting knowledge" — it **strictly rejects both**, and knowledge loses
+because it is the larger quantity.
+
+### Proposed distinction (design opinion, not literature)
+
+No standard taxonomy was found for "which document content becomes a DB row and
+which is knowledge." That is a domain decision. But the *criterion* can be
+stated:
+
+| Question | DB (strict) | Knowledge (lenient) |
+|---|---|---|
+| Is the value used for aggregation or computation? | yes | no — read and quoted |
+| Is a wrong value recoverable? | hard — a bad total propagates silently | easy — a reader notices a strange quoted sentence |
+| Can one field be wrong without spoiling the record? | no — one bad field poisons the row | yes — one broken sentence leaves the rest useful |
+| **Is it verifiable at all?** | yes — types, ranges, arithmetic, referential integrity | mostly no — meaning and style |
+
+**The asymmetry is the last row.** DB values can be held to a high bar *because
+they can be checked*. Knowledge sentences cannot be checked, so the same bar
+rejects all of them. A prose sentence that is verbatim in the source may be
+wrong, but the pipeline still conveys "this document said this", which is what
+retrieval is for. It is quoting, not summarising.
+
+### Sketch: gate strictness tiers
+
+Not implemented. Recorded so the idea is not lost.
+
+| Tier | Pass condition | On failure |
+|---|---|---|
+| `STRICT` | grounding + arithmetic + schema + required fields | quarantine |
+| `STANDARD` | grounding + required fields | quarantine |
+| `LENIENT` | **grounding only** (value is verbatim in the source) | quarantine |
+
+Tier assignment should come from the declared document type or the ontology
+type (`InvoiceHeader` → STRICT, `ProseKnowledge` → LENIENT). **An LLM classifier
+is the wrong mechanism**: the documented failure mode is that a misclassified
+STRICT document silently becomes LENIENT, which is exactly the silent-corruption
+path this repo exists to prevent.
+
+This also fixes something the survey flagged: precision targets should be
+**per class and per tier**, not one global 0.85. The Statistics Canada 20–30%
+hit rate is a statement about *structured* editing, and does not transfer to
+knowledge chunks.
+
+### Not yet measured — do this before building it
+
+The tiers are only worth building if knowledge documents are a meaningful share
+of the corpus. **That is unmeasured.** Every validation so far used synthetic
+invoices; real documents have never been through the pipeline.
+
+A corpus of ~78 real PDFs (Korean business documents, manuals, reports) was
+located on this machine, but processing them was blocked as PII handling, which
+is correct. The run should be done deliberately by the owner:
+
+```bash
+uv run rag-goldset --corpus /path/to/corpus
+```
+
+And the numbers to read, in this order:
+
+| Metric | What it decides |
+|---|---|
+| `unclassified` share | how much knowledge the gate currently discards — decides whether LENIENT is urgent |
+| document-type distribution | invoice-like vs manual vs prose vs scan |
+| `extraction_failed` share | how much is damaged rather than merely unknown |
+| `disagreement` | whether the second parse earns its cost on this corpus |
+
+**If `unclassified` dominates (say >60%), the tier design is the next thing to
+build. If it is small, it is not a priority and the arithmetic checks matter
+more.**
+
+## Other design conclusions reached while building
+
+Ordered by how much they would change the system.
+
+**1. Deterministic checks are the highest-value missing piece.**
+
+The survey's strongest result is that deterministic profiling beat LLM detection
+(0.561 vs 0.421). This repo has almost no deterministic *semantic* checks — it
+verifies "the value is in the source", not "the values are consistent with each
+other". Missing, in descending value:
+
+- arithmetic reconciliation (line items vs total)
+- valid ranges and date plausibility (`2026-13-45`)
+- intra-document contradiction (two different totals; identifier repeated with a
+  different amount)
+- cross-document consistency, once a store exists
+
+These are cheap, deterministic, require no model, and catch a class of error the
+grounding gate cannot see by construction.
+
+**2. `verified` overstates what it means.**
+
+The field means "the value appears in the parser's text buffer where it says it
+does". It is read as "the value is correct". A self-consistent OCR error passes.
+`grounded` (found in source) and `checked` (passed additional validation) should
+be separate fields. Recorded in the README limitations; not yet renamed.
+
+**3. A rule-generation loop needs tests as its gate, not model judgement.**
+
+The proposed loop — LLM writes patterns, deterministic layer applies them
+offline, LLM audits the results and revises the patterns — matches published
+work (LeDQeR's generate-then-filter; TreeED/ForestED's LLM-authored rules
+executed deterministically at inference). The revision step is where it goes
+wrong: critics that also generate compound hallucinations (51.9% of debate-added
+operations fabricated, 95.3% of critic feedback accepted).
+
+So the audit step should emit **falsification cases**, not revised rules:
+
+```json
+{"kind": "rule_false_negative", "rule_id": "...",
+ "document": "...", "contradiction": {...}, "evidence": [{"page":1,"span":[..],"text":"..."}],
+ "proposed_test": {"input": "...", "expected": "quarantine: arithmetic_mismatch"}}
+```
+
+Each case becomes a gold-set entry and a regression test. Rules change only by
+passing those tests. This is also where `circuit.py`, `scoring.py` and
+`goldset.py` already provide the machinery.
+
+**4. Two failure modes to budget for before starting.**
+
+- **Span grounding is not solved.** Best word-level grounding F1 is 46.4%.
+  Requiring a span stops fabricated pointers; it does not stop a valid pointer
+  to text that does not support the claim.
+- **Non-determinism is real even at temperature 0** — measured run-to-run
+  accuracy variance up to 15%, gaps up to 70% (Eval4NLP 2025). Any rule
+  generation must therefore be reproducible by *disabling the model at
+  inference*, not by hoping the model behaves.
+
+**5. T2 as currently scoped may not survive the corpus measurement.**
+
+T2 adjudicates parser disagreement. Across seven deliberately awkward synthetic
+PDFs (two-column, rotated, overlapping, 12-column table, dense small text,
+scan-like), Docling's layout score stayed between 0.61 and 0.99 against a 0.60
+threshold — **T2 never fired once**. Synthetic vector PDFs render perfectly, so
+they cannot reproduce the scan degradation the threshold was set for.
+
+If the real corpus shows the same, T2's cost is not justified in its current
+role, and its useful role is probably the one the survey points at: adjudicating
+*claims* about data-quality violations rather than *parser readings*.
+
+## What remains unknown
+
+- Whether `LENIENT` grounding-only actually preserves retrieval quality, or lets
+  garbage in. Unmeasured.
+- How often tier assignment would be wrong, and what that costs.
+- Whether any standard taxonomy exists for knowledge-vs-structured content in a
+  RAG corpus. Not searched for; the earlier survey only established that no
+  corpus-scale ground truth exists.
+- Real-corpus `verification`, `unclassified`, and `disagreement` rates. **The
+  single most important missing number.**

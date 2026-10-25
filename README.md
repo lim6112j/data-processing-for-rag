@@ -105,6 +105,13 @@ head-to-head of "LLM proposes claim + deterministic verifier" against "LLM
 rewrites directly", and no benchmark scores a finding together with its evidence
 span. The design is supported element-by-element, not as a ratified pattern.
 
+Its **appendix** collects the design conclusions drawn from it, including the
+unbuilt ideas (strict vs lenient validation tiers for DB-bound vs knowledge
+content) and the one measurement that has not been run: this pipeline has never
+processed a real document corpus. The next step recorded there is
+`rag-goldset --corpus`, and the number to read first is the `unclassified`
+share.
+
 ### What it does not do yet
 
 - **Ontology v1 covers two shapes** (invoice header, report section). Real corpora
