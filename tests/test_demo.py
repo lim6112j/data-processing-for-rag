@@ -511,3 +511,75 @@ class TestStructureAndIncompleteCoexist:
 
         assert recorder.calls == 0
         assert view.review_items[0].reason == "ungrounded"
+
+
+class TestLabelsAreVisible:
+    """Saying "recorded as labels" is a claim; the demo must let you verify it."""
+
+    @pytest.fixture
+    def client(self):
+        from rag_ingest.demo import server
+
+        server._session = DemoSession(today=TODAY)
+        return TestClient(server.app)
+
+    def _submit(self, client, answer="1234.56"):
+        from rag_ingest.demo import server
+
+        raw, elements = _source("Invoice INV-3003 total l,234.56 USD")
+        server._session.ingest(
+            doc_id="d1", filename="d.pdf", parser="test", raw=raw, elements=elements
+        )
+        item = server._session.open_items()[0]
+        return client.post(
+            "/api/review",
+            json={"item_id": item.item_id, "after": answer, "role": "owner"},
+        )
+
+    def test_labels_endpoint_is_empty_before_any_review(self, client):
+        assert client.get("/api/labels").json()["corrections"] == []
+
+    def test_submitted_correction_appears_in_the_label_list(self, client):
+        self._submit(client, answer="1234.56 dated 2026-10-27")
+
+        corrections = client.get("/api/labels").json()["corrections"]
+
+        assert len(corrections) == 1
+        assert corrections[0]["after"] == "1234.56 dated 2026-10-27"
+
+    def test_label_records_who_and_when(self, client):
+        self._submit(client)
+
+        correction = client.get("/api/labels").json()["corrections"][0]
+
+        assert correction["reviewer_role"] == "owner"
+        assert correction["captured_on"] == TODAY.isoformat()
+        assert correction["validator_error"]
+
+    def test_labels_download_is_the_same_data(self, client):
+        import json
+
+        self._submit(client)
+
+        response = client.get("/api/labels.json")
+
+        assert response.status_code == 200
+        assert "attachment" in response.headers["content-disposition"]
+        payload = json.loads(response.content)
+        assert len(payload["corrections"]) == 1
+        assert "review_items" in payload
+
+    def test_downloaded_labels_feed_the_scorer(self, client, tmp_path):
+        # The loop the download exists for: save it, score it.
+        import json
+
+        from rag_ingest.cli import main
+
+        self._submit(client)
+        path = tmp_path / "labels.json"
+        path.write_bytes(client.get("/api/labels.json").content)
+
+        exit_code = main(["--score", str(path)])
+
+        assert exit_code == 0
+        assert len(json.loads(path.read_text())["corrections"]) == 1

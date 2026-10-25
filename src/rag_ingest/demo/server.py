@@ -179,6 +179,36 @@ def resolve(body: ReviewRequest) -> dict:
     return _scorecard_payload(card)
 
 
+@app.get("/api/labels")
+def labels() -> dict:
+    """Every correction recorded, in the form the eval loop consumes.
+
+    The scorecard says how many corrections exist; this says *what they are*.
+    Without it "recorded as labels" is an unverifiable claim -- the reviewer has
+    to take the server's word for it.
+    """
+    payload = _session.queue.export()
+    return {
+        "corrections": payload["corrections"],
+        # Download target for the same data, so it can be fed to
+        # `rag-goldset --score`.
+        "download": "/api/labels.json",
+    }
+
+
+@app.get("/api/labels.json")
+def labels_download() -> Response:
+    import json
+
+    payload = _session.queue.export()
+    body = json.dumps(payload, indent=2, ensure_ascii=False)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"content-disposition": 'attachment; filename="labels.json"'},
+    )
+
+
 @app.get("/api/scorecard")
 def scorecard() -> dict:
     return _scorecard_payload(_session.scorecard())
@@ -189,6 +219,11 @@ def _scorecard_payload(card) -> dict:
     return {
         "scored": card.total_scored,
         "excluded": card.excluded,
+        # Why the numbers above may not apply. Empty when they do.
+        "explain": card.explain(),
+        "exclusions": {
+            reason.value: count for reason, count in card.exclusions.items()
+        },
         "picks": card.picks,
         "abstentions": card.abstentions,
         "precision": card.precision,

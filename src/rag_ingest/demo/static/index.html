@@ -124,6 +124,15 @@
       <h2>T2 adjudication quality</h2>
       <div id="scorecard" class="empty">No corrections recorded yet.</div>
     </div>
+    <div class="section">
+      <h2>Recorded labels <span id="label-count" class="muted"></span></h2>
+      <div id="labels" class="empty">Nothing recorded yet.</div>
+      <div class="row" id="label-actions" style="margin-top:8px;display:none">
+        <a id="label-download" href="/api/labels.json" download="labels.json"
+           style="color:var(--accent);font-size:12.5px">download labels.json</a>
+        <span class="muted" style="font-size:11.5px">→ feed to <code>rag-goldset --score</code></span>
+      </div>
+    </div>
   </aside>
 </main>
 
@@ -321,12 +330,48 @@ function placeRelative(node, bbox, originLeft, originTop, scale) {
 
 /* ---------- sidebar ---------- */
 async function refreshSidebar() {
-  const [review, card] = await Promise.all([
+  const [review, card, labels] = await Promise.all([
     (await fetch('/api/review')).json(),
     (await fetch('/api/scorecard')).json(),
+    (await fetch('/api/labels')).json(),
   ]);
   renderReview(review.items);
   renderScorecard(card);
+  renderLabels(labels.corrections);
+}
+
+function renderLabels(corrections) {
+  const el = $('#labels');
+  const actions = $('#label-actions');
+  $('#label-count').textContent = corrections.length ? `(${corrections.length})` : '';
+
+  if (!corrections.length) {
+    el.innerHTML = '<div class="empty">Nothing recorded yet.</div>';
+    el.classList.add('empty');
+    actions.style.display = 'none';
+    return;
+  }
+
+  el.classList.remove('empty');
+  actions.style.display = 'flex';
+  // Newest first: the thing the reviewer just entered should be at the top.
+  el.innerHTML = corrections.slice().reverse().map(c => `
+    <div class="card">
+      <div class="meta mono">${esc(c.chunk_id)}</div>
+      <table style="font-size:12px">
+        <tr><th>answer</th><td class="mono">${esc(c.after)}</td></tr>
+        <tr><th>field</th><td class="mono">${esc(c.field)}</td></tr>
+        <tr><th>was</th><td class="mono">${c.before == null
+          ? '<span class="muted">—</span>' : esc(c.before)}</td></tr>
+        <tr><th>reason</th><td class="mono">${esc(c.validator_error)}</td></tr>
+        <tr><th>reviewer</th><td class="mono">${esc(c.reviewer_id)}
+          <span class="muted">(${esc(c.reviewer_role)})</span></td></tr>
+        <tr><th>captured</th><td class="mono">${esc(c.captured_on)}</td></tr>
+        ${c.adjudication_choice ? `<tr><th>T2 picked</th><td class="mono">${esc(c.adjudication_choice)}</td></tr>` : ''}
+        ${c.candidate_ids && c.candidate_ids.length
+          ? `<tr><th>candidates</th><td class="mono">${c.candidate_ids.map(esc).join('<br>')}</td></tr>` : ''}
+      </table>
+    </div>`).join('');
 }
 
 function renderReview(items) {
@@ -392,15 +437,19 @@ async function resolveItem(itemId, isChoice) {
 }
 
 function renderScorecard(c) {
-  if (!c.scored && !c.excluded) {
-    $('#scorecard').innerHTML = '<div class="empty">No corrections recorded yet.</div>';
+  if (!c.scored) {
+    // Say why. A reviewer who just answered a question and sees only "no
+    // labelled cases yet" cannot tell whether their answer was lost.
+    $('#scorecard').innerHTML = c.explain
+      ? `<div class="empty">${esc(c.explain)}</div>`
+      : '<div class="empty">No corrections recorded yet.</div>';
     return;
   }
   const pct = (v) => v == null ? 'n/a' : `${Math.round(v * 100)}%`;
   const b = c.breaker;
   $('#scorecard').innerHTML = `
     <table>
-      <tr><th>scored</th><td>${c.scored} <span class="muted">(${c.excluded} excluded)</span></td></tr>
+      <tr><th>scored</th><td>${c.scored} <span class="muted">(${c.excluded} not T2-scored)</span></td></tr>
       <tr><th>picks</th><td>${c.picks} <span class="muted">· ${c.abstentions} abstentions</span></td></tr>
       <tr><th>precision</th><td>${pct(c.precision)}</td></tr>
       <tr><th>coverage</th><td>${pct(c.coverage)}</td></tr>

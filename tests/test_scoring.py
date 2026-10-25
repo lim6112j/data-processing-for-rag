@@ -107,14 +107,17 @@ def test_unmatched_chunk_is_excluded():
     assert card.excluded == 1
 
 
-def test_owner_answer_that_names_no_candidate_is_unscorable():
+def test_owner_answer_that_names_no_candidate_is_counted_separately():
     # Guessing "it sounds like X" would make the metric flatter itself.
+    from rag_ingest.scoring import Exclusion
+
     card = score(
         [_correction(after="the table has 4 columns")],
         {"c1": _item(choice="c1:pdfplumber")},
     )
 
-    assert card.scored[0].outcome is Outcome.UNSCORABLE
+    assert card.scored == ()
+    assert card.exclusions[Exclusion.NO_CANDIDATE_NAMED] == 1
 
 
 def test_item_without_candidate_set_is_excluded():

@@ -51,15 +51,65 @@ class ScoredCorrection(BaseModel):
     detail: str | None = None
 
 
+class Exclusion(StrEnum):
+    """Why a correction did not become a T2 measurement.
+
+    Kept as distinct reasons rather than one counter: they mean different things
+    to the person reading the report. "T2 was never involved" is normal; "T2 was
+    involved but the answer could not be compared" is a gap in the label.
+    """
+
+    #: T2 was not consulted for this chunk at all -- e.g. an incomplete
+    #: extraction or an unclassified document. There is no adjudication to score,
+    #: and the correction still counts as a label.
+    T2_NOT_INVOLVED = "t2_not_involved"
+    #: A verifier (not the document owner) answered. Not ground truth.
+    NOT_AUTHORITATIVE = "not_authoritative"
+    #: Candidates were offered but the owner's answer named none of them, so
+    #: there is no ground-truth choice to compare against.
+    NO_CANDIDATE_NAMED = "no_candidate_named"
+
+
 class T2ScoreCard(BaseModel):
     """Aggregate health of T2 over a labelled set."""
 
     model_config = ConfigDict(frozen=True)
 
     scored: tuple[ScoredCorrection, ...] = Field(default_factory=tuple)
-    #: Corrections skipped because they were not authoritative (verifier guesses
-    #: are not ground truth) or could not be joined to an adjudication.
-    excluded: int = Field(default=0, ge=0)
+    #: Why corrections were not scored, by reason.
+    exclusions: dict[Exclusion, int] = Field(default_factory=dict)
+
+    @property
+    def excluded(self) -> int:
+        return sum(self.exclusions.values())
+
+    def explain(self) -> str:
+        """One line saying why the metrics do or do not apply.
+
+        A reviewer who just answered a question and sees "no labelled cases yet"
+        has no way to know whether their answer was lost, rejected, or simply
+        out of scope for this metric. Silence reads as a bug.
+        """
+        if self.total_scored > 0:
+            return ""
+        if not self.exclusions:
+            return "No corrections recorded yet."
+
+        reasons = []
+        if self.exclusions.get(Exclusion.T2_NOT_INVOLVED):
+            reasons.append(
+                "T2 was not involved in those chunks, so accuracy does not apply"
+            )
+        if self.exclusions.get(Exclusion.NOT_AUTHORITATIVE):
+            reasons.append("answered by a verifier rather than the document owner")
+        if self.exclusions.get(Exclusion.NO_CANDIDATE_NAMED):
+            reasons.append("the answer did not name one of the candidate readings")
+
+        return (
+            f"{self.excluded} correction(s) recorded but none are T2 measurements: "
+            + "; ".join(reasons)
+            + ". The corrections are still stored as labels."
+        )
 
     def _count(self, outcome: Outcome) -> int:
         return sum(1 for item in self.scored if item.outcome is outcome)
@@ -167,11 +217,14 @@ def score(
     against it would measure agreement with a bystander.
     """
     scored: list[ScoredCorrection] = []
-    excluded = 0
+    exclusions: dict[Exclusion, int] = {}
+
+    def exclude(reason: Exclusion) -> None:
+        exclusions[reason] = exclusions.get(reason, 0) + 1
 
     for correction in corrections:
         if not correction.is_authoritative:
-            excluded += 1
+            exclude(Exclusion.NOT_AUTHORITATIVE)
             continue
 
         item = review_items.get(correction.chunk_id)
@@ -186,7 +239,10 @@ def score(
         )
 
         if not candidate_ids:
-            excluded += 1
+            # No candidates means T2 was never asked -- an incomplete extraction,
+            # an unclassified document, or a single-parser run. The correction is
+            # a label, just not a T2 measurement.
+            exclude(Exclusion.T2_NOT_INVOLVED)
             continue
 
         owner_choice = _owner_choice(correction, candidate_ids)
@@ -207,15 +263,7 @@ def score(
             # choice there is nothing to compare T2 against -- and guessing that
             # the answer "sounds like" one candidate is how scoring systems start
             # flattering themselves.
-            scored.append(
-                ScoredCorrection(
-                    chunk_id=correction.chunk_id,
-                    field=correction.field,
-                    outcome=Outcome.UNSCORABLE,
-                    adjudicated_choice=adjudicated,
-                    detail="owner answer did not name a candidate",
-                )
-            )
+            exclude(Exclusion.NO_CANDIDATE_NAMED)
             continue
 
         outcome = Outcome.CORRECT if adjudicated == owner_choice else Outcome.INCORRECT
@@ -229,10 +277,11 @@ def score(
             )
         )
 
-    return T2ScoreCard(scored=tuple(scored), excluded=excluded)
+    return T2ScoreCard(scored=tuple(scored), exclusions=exclusions)
 
 
 __all__ = [
+    "Exclusion",
     "Outcome",
     "ScoredCorrection",
     "T2ScoreCard",
