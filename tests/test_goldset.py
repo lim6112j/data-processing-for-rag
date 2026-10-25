@@ -118,3 +118,86 @@ def test_case_result_records_reasons(goldset):
 
     assert result.passed
     assert result.failures == ()
+
+
+class TestReviewQuestionWording:
+    """The question must say what to do, not just what is wrong.
+
+    A reviewer reading "missing: issue_date, total_amount, currency" cannot tell
+    a damaged scan from absent information -- so they cannot know whether to
+    rescan or to supply a value.
+    """
+
+    def _item(self, text: str):
+        """Run the real extractor over a document and return its review item."""
+        from rag_ingest.docmodel import Element, ElementKind, RawDocument
+        from rag_ingest.escalation import ReviewQueue
+        from rag_ingest.extractors import TemplateExtractor
+        from rag_ingest.pipeline import IngestPipeline
+
+        raw, elements = RawDocument.from_elements(
+            "d1",
+            [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text=text)],
+        )
+        queue = ReviewQueue()
+        outcome = IngestPipeline(queue, TemplateExtractor(), today=TODAY).ingest(
+            raw, elements, owner_id="o"
+        )
+        # The pipeline produces items; enqueueing is the caller's job.
+        for review_item in outcome.review_items:
+            queue.enqueue(review_item)
+        return queue.open_items()[0]
+
+    def test_damaged_value_is_described_as_unreadable_not_absent(self):
+        item = self._item("Invoice INV-3003 total l,234.56 USD")
+
+        assert "could not read" in item.question
+        assert "total amount" in item.question
+        # The reviewer must not be told to supply a value that is right there.
+        assert "did not find total amount" not in item.question
+
+    def test_absent_fields_are_separated_from_damaged_ones(self):
+        item = self._item("Invoice INV-3003 total l,234.56 USD")
+
+        # currency is absent; total_amount is damaged. Different actions.
+        assert "did not find" in item.question
+        assert "currency" in item.question
+
+    def test_empty_heading_does_not_produce_an_empty_quote(self):
+        # "under ''" was the original bug: a chunk with no heading produced a
+        # sentence quoting nothing.
+        item = self._item("Invoice INV-3003 total l,234.56 USD")
+
+        assert "''" not in item.question
+
+    def test_question_names_what_was_read(self):
+        item = self._item("Invoice INV-3003 total l,234.56 USD")
+
+        assert "read invoice number" in item.question
+
+    def test_heading_is_quoted_when_one_exists(self):
+        from rag_ingest.docmodel import Element, ElementKind, RawDocument
+        from rag_ingest.escalation import ReviewQueue
+        from rag_ingest.extractors import TemplateExtractor
+        from rag_ingest.pipeline import IngestPipeline
+
+        raw, elements = RawDocument.from_elements(
+            "d1",
+            [
+                Element(element_id="h", kind=ElementKind.HEADING, page=1, text="Invoices", level=1),
+                Element(
+                    element_id="e1",
+                    kind=ElementKind.PARAGRAPH,
+                    page=1,
+                    text="Invoice INV-3003 total l,234.56 USD",
+                ),
+            ],
+        )
+        queue = ReviewQueue()
+        outcome = IngestPipeline(queue, TemplateExtractor(), today=TODAY).ingest(
+            raw, elements, owner_id="o"
+        )
+        for review_item in outcome.review_items:
+            queue.enqueue(review_item)
+
+        assert "under 'Invoices'" in queue.open_items()[0].question

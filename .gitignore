@@ -18,3 +18,9 @@ htmlcov/
 # Demo screenshots and Playwright scratch
 demo-*.png
 .playwright-mcp/
+
+# macOS
+.DS_Store
+
+# Screenshots from verification runs
+*.png

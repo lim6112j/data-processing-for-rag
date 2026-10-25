@@ -229,15 +229,43 @@ class IngestPipeline:
             issues = result.issues
         elif result is not None and result.status is GroundingStatus.INCOMPLETE:
             reason = EscalationReason.INCOMPLETE_EXTRACTION
-            missing = ", ".join(
-                issue.field
+            issue_by_field = {
+                issue.field: issue
                 for issue in result.issues
                 if issue.status is GroundingStatus.ABSTAINED
-            )
+            }
+            # "Not legible" and "not present" need different actions from the
+            # reviewer: one is a re-scan, the other is new information. Collapsing
+            # them into "missing" told them nothing about what to do.
+            illegible = [
+                name for name in issue_by_field if "illegible" in issue_by_field[name].message
+            ]
+            absent = [name for name in issue_by_field if name not in illegible]
+            found = [
+                name
+                for name in _field_names(extraction)
+                if name not in issue_by_field
+            ]
+
+            parts = []
+            where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
+            if found:
+                parts.append(f"read {_join(found)}")
+            if illegible:
+                parts.append(f"could not read {_join(illegible)} (damaged or illegible)")
+            if absent:
+                parts.append(f"did not find {_join(absent)}")
+
             question = (
-                f"Only part of the record under '{chunk.heading_path}' could be read "
-                f"(missing: {missing}). What are the missing values?"
+                f"Partially read the record{where}: " + "; ".join(parts) + "."
             )
+            if illegible:
+                question += (
+                    " For the damaged fields, is a clearer scan available,"
+                    " and what are the correct values?"
+                )
+            if absent:
+                question += " For the missing fields, what should they be?"
             issues = result.issues
         elif structure_ambiguous:
             # Structural conflict -- the one case T2 exists for.
@@ -334,6 +362,29 @@ class IngestPipeline:
                 reason=AbstainReason.AMBIGUOUS,
                 rationale=f"T2 failed: {type(exc).__name__}",
             )
+
+
+def _field_names(extraction: Extraction | None) -> list[str]:
+    """Field names of an extraction, in declaration order.
+
+    Derived rather than hardcoded so adding an ontology field cannot silently
+    drop it from the review question.
+    """
+    if extraction is None:
+        return []
+    return [
+        name
+        for name in type(extraction).model_fields
+        if name not in ("doc_type", "kind")
+    ]
+
+
+def _join(names: list[str]) -> str:
+    """Readable list: 'a, b and c'."""
+    human = [name.replace("_", " ") for name in names]
+    if len(human) <= 1:
+        return "".join(human)
+    return f"{', '.join(human[:-1])} and {human[-1]}"
 
 
 def _has_unreliable_structure(
