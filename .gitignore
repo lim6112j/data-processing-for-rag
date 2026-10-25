@@ -14,3 +14,7 @@ wheels/
 .coverage.*
 htmlcov/
 .pytest_cache/
+
+# Demo screenshots and Playwright scratch
+demo-*.png
+.playwright-mcp/

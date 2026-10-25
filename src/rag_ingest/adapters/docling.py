@@ -275,12 +275,17 @@ def pdf_to_raw(
     document = result.document
 
     images = render_page_images(document) if render_images else None
-    return document_to_raw(
+    sizes = {
+        int(page_no): (float(page.size.width), float(page.size.height))
+        for page_no, page in document.pages.items()
+        if getattr(page, "size", None) is not None
+    }
+    elements = document_to_elements(
         document,
-        doc_id=doc_id,
-        # The confidence report lives on the ConversionResult, not the document.
-        confidence=getattr(result, "confidence", None),
-        page_images=images,
+        scores_by_page=page_scores(document, getattr(result, "confidence", None)),
+    )
+    return RawDocument.from_elements(
+        doc_id, elements, page_images=images, page_sizes=sizes
     )
 
 
