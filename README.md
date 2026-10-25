@@ -1,6 +1,6 @@
 # rag-ingest
 
-**Status:** working prototype. 292 tests, 93% coverage, runs real PDFs end-to-end
+**Status:** working prototype. 314 tests, runs real PDFs end-to-end
 through Docling + pdfplumber with OpenRouter as the adjudication backend, and
 ships an interactive demo server.
 
@@ -40,7 +40,7 @@ it stops being right.
 | T3 | Chunk-scoped review queue with owner-correction labels |
 
 ```bash
-uv run pytest                          # 292 tests, no network
+uv run pytest                          # 314 tests, no network
 uv run rag-demo                        # interactive UI on :8765
 uv run rag-goldset                     # decision-level gold set (6/6)
 uv run rag-goldset --corpus ./pdfs     # real PDFs, per-document accounting
@@ -87,6 +87,23 @@ screenshots below are from that run.
 
 `tests/test_demo.py` covers the parts that break silently: routing, item-id
 handling, and the review loop's effect on the scorecard.
+
+### Evidence base
+
+The design is informed by a literature survey of LLM-based data cleaning:
+[**survey.md**](survey.md). Three findings there changed decisions in this repo:
+
+- **Deterministic profiling beat LLM detection** (F1 0.561 vs 0.421) and LLM
+  *repair* was near-worthless (0.028) — so the model was kept out of T0/T1.
+- **Human edit systems run at a 20–30% flag hit rate** (Statistics Canada) — 70–80%
+  of flags being false alarms is the industry baseline, not a failure.
+- **Span grounding is not solved** (best word-level F1 46.4%) — requiring a
+  provenance span is necessary, not sufficient.
+
+The survey also records where the evidence is thin: no paper runs the direct
+head-to-head of "LLM proposes claim + deterministic verifier" against "LLM
+rewrites directly", and no benchmark scores a finding together with its evidence
+span. The design is supported element-by-element, not as a ratified pattern.
 
 ### What it does not do yet
 
@@ -169,6 +186,8 @@ deliberately tiny.
 | 10 | `ingest_runner.py` | Real corpus at scale: failure isolation and honest accounting |
 | 11 | `adapters/docling.py` | Primary parse stream: layout model + TableFormer, page-level confidence |
 | 12 | `extractors.py` | T0 extraction: deterministic, provenance-producing, model-free |
+
+The literature survey behind these choices lives in [survey.md](survey.md).
 
 Tiers 0 and 1 contain **no model**.
 
@@ -442,14 +461,14 @@ src/rag_ingest/
     producers.py    scripted second reading, so T2 is reachable in a demo
     fake_adjudicator.py  scripted T2 -- shape of the path, not judgement
     static/index.html    the UI
-tests/            292 tests, 93% coverage
+tests/            314 tests
 goldset/cases.yaml  adversarial cases, each asserting a decision
 ```
 
 ## Run it
 
 ```bash
-uv run pytest                                 # 292 tests
+uv run pytest                                 # 314 tests
 uv run pytest -m live                         # one real OpenRouter call
 uv run pytest --cov=rag_ingest                # coverage
 uv run rag-goldset                            # gold-set report
@@ -500,6 +519,10 @@ and per-class, because a 5% global rate can hide 100% on one high-volume class.
   stay visible rather than silently accepted.
 - Ontology v1 deliberately covers two shapes only. Extend it from the cluster
   report on a real seed corpus, not from imagination.
+- **`verified` is a weaker claim than it sounds.** It means "the value appears in
+  the parser's text buffer where it claims to", not "the value is correct". A
+  self-consistent OCR error passes. See [survey.md](survey.md) §3 on why span
+  validity does not imply claim support.
 - `RawDocument.from_elements` synthesizes page text by joining element
   renderings. Both shipped adapters go through it, so provenance spans index into
   the *joined* buffer rather than the parser's native text. That is internally
