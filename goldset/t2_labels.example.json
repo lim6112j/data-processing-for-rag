@@ -1,0 +1,91 @@
+{
+  "_comment": "Example label export for `rag-goldset --score`. Produced by ReviewQueue.export(). Three T2 picks, one of them wrong: that is the case the metric exists to surface.",
+  "corrections": [
+    {
+      "doc_id": "d1",
+      "chunk_id": "d1:table:e1",
+      "field": "table_structure",
+      "validator_error": "structure",
+      "before": null,
+      "after": "d1:table:e1:alternate",
+      "reviewer_id": "owner-a",
+      "reviewer_role": "owner",
+      "captured_on": "2026-10-25",
+      "adjudication_choice": "d1:table:e1:alternate"
+    },
+    {
+      "doc_id": "d2",
+      "chunk_id": "d2:table:e1",
+      "field": "table_structure",
+      "validator_error": "structure",
+      "before": null,
+      "after": "d2:table:e1:primary",
+      "reviewer_id": "owner-a",
+      "reviewer_role": "owner",
+      "captured_on": "2026-10-25",
+      "adjudication_choice": "d2:table:e1:primary"
+    },
+    {
+      "doc_id": "d3",
+      "chunk_id": "d3:table:e1",
+      "field": "table_structure",
+      "validator_error": "structure",
+      "before": null,
+      "after": "d3:table:e1:primary",
+      "reviewer_id": "owner-b",
+      "reviewer_role": "owner",
+      "captured_on": "2026-10-25",
+      "adjudication_choice": "d3:table:e1:alternate"
+    }
+  ],
+  "review_items": [
+    {
+      "item_id": "i1",
+      "doc_id": "d1",
+      "chunk_id": "d1:table:e1",
+      "reason": "structure_ambiguous",
+      "question": "q",
+      "owner_id": "owner-a",
+      "created_on": "2026-10-25",
+      "retrieval_demand": 5,
+      "candidate_ids": [
+        "d1:table:e1:primary",
+        "d1:table:e1:alternate"
+      ],
+      "adjudicated_choice": "d1:table:e1:alternate",
+      "resolved": true
+    },
+    {
+      "item_id": "i2",
+      "doc_id": "d2",
+      "chunk_id": "d2:table:e1",
+      "reason": "structure_ambiguous",
+      "question": "q",
+      "owner_id": "owner-a",
+      "created_on": "2026-10-25",
+      "retrieval_demand": 5,
+      "candidate_ids": [
+        "d2:table:e1:primary",
+        "d2:table:e1:alternate"
+      ],
+      "adjudicated_choice": "d2:table:e1:primary",
+      "resolved": true
+    },
+    {
+      "item_id": "i3",
+      "doc_id": "d3",
+      "chunk_id": "d3:table:e1",
+      "reason": "structure_ambiguous",
+      "question": "q",
+      "owner_id": "owner-b",
+      "created_on": "2026-10-25",
+      "retrieval_demand": 5,
+      "candidate_ids": [
+        "d3:table:e1:primary",
+        "d3:table:e1:alternate"
+      ],
+      "adjudicated_choice": "d3:table:e1:alternate",
+      "resolved": true
+    }
+  ]
+}
