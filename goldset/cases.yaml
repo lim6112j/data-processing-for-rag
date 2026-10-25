@@ -1,0 +1,114 @@
+# Gold set (plan section 7-2).
+#
+# Each case states the expected *retrieval outcome* and, where relevant, the
+# expected *escalation decision*. Without this file every threshold in the
+# pipeline is an opinion.
+#
+# Fields:
+#   expected.verified       chunks that must pass grounding
+#   expected.quarantined    chunks that must be withheld
+#   expected.reason         escalation reason that must appear for this case
+#   expected.not_retrievable terms that must never appear in verified results
+
+cases:
+  - id: clean-invoice
+    description: >
+      Well-formed invoice with a legible text layer. The boring case: everything
+      should verify, nothing should be queued.
+    class: invoice
+    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
+    pages:
+      - |
+        INVOICE
+        Invoice INV-2041
+        Total 1,234.56 KRW
+    extractor_claim:
+      invoice_number: "INV-2041"
+      total_amount: "1234.56"
+      currency: "KRW"
+    expected:
+      verified: 1
+      quarantined: 0
+      reason: null
+
+  - id: ocr-lowercase-l-total
+    description: >
+      The canonical failure. OCR reads "l,234.56" for "1,234.56". A constrained
+      extractor cannot emit invalid JSON, so it emits a legal but invented
+      number. Schema validation passes; grounding must fail it.
+    class: invoice
+    scores: { ocr: 0.72, layout: 0.9, parse: 0.88 }
+    pages:
+      - |
+        INVOICE
+        Invoice INV-2042
+        Total l,234.56 KRW
+    extractor_claim: { total_amount: "1334.56" }
+    expected:
+      verified: 0
+      quarantined: 1
+      reason: ungrounded
+      not_retrievable: ["1334.56"]
+
+  - id: scanned-no-text-layer
+    description: >
+      A scan with no usable text layer. Nothing should be extracted, because
+      attempting semantics on garbage guarantees a confident wrong answer.
+    class: invoice
+    scores: { ocr: 0.18, layout: 0.55, parse: 0.2 }
+    pages:
+      - "Invoice total approx 900.00"
+    expected:
+      verified: 0
+      quarantined: 0
+      reason: extraction_failed
+
+  - id: unclassified-poem
+    description: >
+      Perfectly readable, matches no defined type. A closed ontology cannot
+      detect this; the unclassified path must, without counting it as a schema
+      failure.
+    class: unknown
+    scores: { ocr: 0.97, layout: 0.93, parse: 0.95 }
+    pages:
+      - |
+        Procurement Haiku
+        Forms in triplicate
+        a stamp waits for a signature
+        the budget sleeps on
+    extractor_claim: unclassified
+    expected:
+      verified: 0
+      quarantined: 1
+      reason: unclassified
+
+  - id: table-must-not-split
+    description: >
+      A long table. Whatever happens to its verification, it must remain a
+      single chunk: a table row without its header row is worse than no chunk.
+    class: invoice
+    scores: { ocr: 0.95, layout: 0.92, parse: 0.9 }
+    pages:
+      - "Line items"
+    table_rows: 40
+    expected:
+      table_chunks: 1
+
+  - id: mixed-document-partial-quarantine
+    description: >
+      One section is legible and grounds, another is a bad scan. Retrieval must
+      return the good section and withhold only the bad chunk -- never the whole
+      document.
+    class: invoice
+    scores: { ocr: 0.95, layout: 0.9, parse: 0.9 }
+    sections:
+      - text: "Invoice INV-2043 total 500.00 KRW"
+        scores: { ocr: 0.95, layout: 0.9, parse: 0.9 }
+      - text: "handwritten illegible scribble"
+        scores: { ocr: 0.2, layout: 0.4, parse: 0.3 }
+    extractor_claim:
+      invoice_number: "INV-2043"
+      total_amount: "500.00"
+    expected:
+      verified: 1
+      reason: extraction_failed

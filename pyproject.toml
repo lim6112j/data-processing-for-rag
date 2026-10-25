@@ -1,0 +1,46 @@
+[project]
+name = "rag-ingest"
+version = "0.1.0"
+description = "Grounding-gated ingestion for RAG: structure-preserving chunking, provenance verification, and chunk-level quarantine"
+readme = "README.md"
+authors = [
+    { name = "Ben Lim", email = "lim6112j@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "docling>=2.142.1",
+    "openai>=3.37.0",
+    "pdfplumber>=0.11.10",
+    "pydantic>=2.14.1",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+rag-goldset = "rag_ingest.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not live'"
+markers = [
+    "live: hits a real external API; requires OPENROUTER_API_KEY",
+    "docling: needs Docling installed (loads model weights)",
+]
+pythonpath = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
+
+[build-system]
+requires = ["uv_build>=0.11.22,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.2",
+]
