@@ -153,8 +153,8 @@ def _parse_amount(raw: str) -> Decimal | None:
     """Parse an amount, or None when the value does not claim to be one.
 
     Same discipline as the gate's ``_numeric_key``: separators and currency
-    symbols are format, not damage; anything else is silence. A damaged line
-    (``l,234.56``) yields None, which silences reconciliation rather than
+    symbols are format, not value; anything else is silence. A token that is
+    not a number yields None, which silences reconciliation rather than
     pretending the sum is known.
     """
     candidate = raw.strip()
@@ -183,8 +183,8 @@ def _check_arithmetic_reconciliation(
 
     The check fires only on complete evidence: one unparseable line silences
     it, because summing a subset and calling the mismatch a finding would
-    quarantine every invoice with a single damaged line. Silence here is the
-    correct outcome; grounding has already marked the damaged text.
+    quarantine every invoice with a single unreadable row. Silence here is
+    the correct outcome: incomplete evidence is not a finding.
     """
     if not extraction.line_items:
         return None
