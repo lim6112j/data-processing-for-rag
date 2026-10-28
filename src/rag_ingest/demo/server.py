@@ -180,9 +180,10 @@ def resolve(body: ReviewRequest) -> dict:
 
 
 class AdoptRequest(BaseModel):
-    """An owner-approved shape contract, arriving as data."""
+    """An owner-approved shape contract, arriving as data, with its cases."""
 
     contract: dict
+    cases: list[dict] = Field(default_factory=list)
 
 
 class VerifyShapeRequest(BaseModel):
@@ -246,17 +247,49 @@ def propose_schema(body: dict) -> dict:
 
 @app.post("/api/adopt")
 def adopt(body: AdoptRequest) -> dict:
-    """Register an owner-approved contract. Effective immediately, no restart."""
+    """Run the adoption gate, then register. Effective immediately, no restart.
+
+    422 on an invalid declaration, 409 on a duplicate, and -- the important
+    one -- 409-with-failures when the gold cases falsify the contract: the
+    response carries every failing case so the UI can show what broke and
+    the registry stays untouched.
+    """
     from rag_ingest.shapes import ShapeContract
 
     try:
         contract = ShapeContract.from_definition(body.contract)
     except Exception as exc:
         raise HTTPException(422, f"invalid contract: {exc}") from exc
+
+    cases = body.cases or [
+        # No cases supplied: derive the honest minimum -- one positive case
+        # per required field pair is not derivable generically, so an
+        # adoption without cases is refused rather than rubber-stamped.
+    ]
+    if not cases:
+        raise HTTPException(
+            422,
+            "adoption requires gold cases: declare at least one case "
+            "expecting verified and one expecting a refusal of a value the "
+            "contract must catch",
+        )
+
     try:
-        _session.adopt(contract)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        from rag_ingest.shapes import GoldCaseSpec
+
+        spec = GoldCaseSpec.from_claims(contract.name, cases)
+    except Exception as exc:
+        raise HTTPException(422, f"invalid cases: {exc}") from exc
+
+    result = _session.adopt_with_gate(contract, spec)
+    if not result.registered:
+        raise HTTPException(
+            409,
+            detail={
+                "message": "adoption blocked: the contract failed its cases",
+                "failed_cases": [f.model_dump(mode="json") for f in result.failed_cases],
+            },
+        )
     return {"registered": True, "name": contract.name, "tier": contract.tier.value}
 
 

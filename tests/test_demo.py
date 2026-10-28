@@ -826,11 +826,40 @@ class TestShapeDiscoveryAPI:
                  "min_ref": "torque_min"},
             ],
         }
-        response = client.post("/api/adopt", json={"contract": contract})
+        cases = [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "mismatch"},
+        ]
+        response = client.post("/api/adopt", json={"contract": contract, "cases": cases})
 
         assert response.status_code == 200
         assert response.json()["registered"] is True
         assert session.registry().lookup("torque_spec") is not None
+
+    def test_adopt_endpoint_blocks_a_falsified_contract_with_the_failures(self):
+        client, session = self._client_with_tables()
+
+        contract = {
+            "name": "loose",
+            "tier": "strict",
+            "fields": [
+                {"name": "lo", "kind": "number", "required": True},
+                {"name": "hi", "kind": "number", "required": True},
+            ],
+        }
+        cases = [
+            # The owner expects the gate to refuse an inverted range, but the
+            # contract declares no min_ref constraint -- the gate passes it,
+            # which falsifies the contract. Blocked.
+            {"lo": "70", "hi": "50", "expected": "mismatch"},
+        ]
+        response = client.post("/api/adopt", json={"contract": contract, "cases": cases})
+
+        assert response.status_code == 409
+        body = response.json()
+        assert body["detail"]["failed_cases"][0]["expected"] == "mismatch"
+        assert session.registry().lookup("loose") is None
 
     def test_adopt_rejects_an_invalid_contract(self):
         client, _ = self._client_with_tables()
@@ -842,6 +871,21 @@ class TestShapeDiscoveryAPI:
                 {"name": "x", "kind": "number", "required": True,
                  "min_ref": "ghost_field"},
             ],
+        }
+        cases = [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+        ]
+        response = client.post("/api/adopt", json={"contract": contract, "cases": cases})
+
+        assert response.status_code == 422
+
+    def test_adopt_without_cases_is_refused(self):
+        client, _ = self._client_with_tables()
+
+        contract = {
+            "name": "any",
+            "tier": "strict",
+            "fields": [{"name": "x", "kind": "text", "required": True}],
         }
         response = client.post("/api/adopt", json={"contract": contract})
 
@@ -859,7 +903,11 @@ class TestShapeDiscoveryAPI:
                  "min_ref": "torque_min"},
             ],
         }
-        client.post("/api/adopt", json={"contract": contract})
+        client.post("/api/adopt", json={"contract": contract, "cases": [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "mismatch"},
+        ]})
 
         response = client.post(
             "/api/verify-shape",
@@ -886,7 +934,11 @@ class TestShapeDiscoveryAPI:
                  "min_ref": "torque_min"},
             ],
         }
-        client.post("/api/adopt", json={"contract": contract})
+        client.post("/api/adopt", json={"contract": contract, "cases": [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "mismatch"},
+        ]})
 
         response = client.post(
             "/api/verify-shape",
@@ -902,3 +954,91 @@ class TestShapeDiscoveryAPI:
         body = response.json()
         assert body["verified"] is False
         assert body["status"] == "mismatch"
+
+
+class TestAdoptionGateInSession:
+    """Adoption runs the gate first: cases pass -> register; any failure ->
+    refuse with the falsifications, registry untouched."""
+
+    def _session_with_tables(self):
+        from rag_ingest.demo.session import DemoSession
+
+        session = DemoSession(today=TODAY)
+        # Reuse the three-document tabular cluster helper from the discovery
+        # flow so the scenario matches what the UI shows.
+        flow = TestShapeDiscoveryFlow()
+        flow._ingest_tables(session)
+        return session
+
+    def _contract(self):
+        from rag_ingest.gate_tier import GateTier
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        return ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(name="torque_max", kind="number", required=True,
+                          min_ref="torque_min"),
+            ),
+        )
+
+    def _cases(self):
+        from rag_ingest.shapes import GoldCaseSpec
+
+        return GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "mismatch"},  # gate MUST refuse: constraint proven
+        ])
+
+    def test_adopt_runs_cases_and_registers_on_pass(self):
+        session = self._session_with_tables()
+
+        result = session.adopt_with_gate(self._contract(), self._cases())
+
+        assert result.registered is True
+        assert session.registry().lookup("torque_spec") is not None
+
+    def test_adopt_blocks_when_a_case_falsifies_the_contract(self):
+        from rag_ingest.shapes import GoldCaseSpec
+
+        session = self._session_with_tables()
+        # A case expects a refusal the contract cannot produce: no enum, and
+        # the value is verbatim in the span, so the gate passes it.
+        cases = GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70",
+             "expected": "verified"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "verified"},  # gate will REFUSE (min_ref) -> falsifies
+        ])
+
+        result = session.adopt_with_gate(self._contract(), cases)
+
+        assert result.registered is False
+        assert session.registry().lookup("torque_spec") is None
+        assert result.failed_cases
+        assert result.failed_cases[0].expected == "verified"
+        assert result.failed_cases[0].got == "mismatch"
+
+    def test_failed_adoption_keeps_the_shape_unavailable_for_verification(self):
+        from rag_ingest.shapes import GoldCaseSpec
+
+        session = self._session_with_tables()
+        cases = GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "verified"},  # will be refused -> falsification
+        ])
+
+        result = session.adopt_with_gate(self._contract(), cases)
+        assert result.registered is False
+
+        import pytest
+
+        with pytest.raises(KeyError):
+            session.check_against_shape(
+                "torque_spec", "1/4-28 50-70",
+                {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            )

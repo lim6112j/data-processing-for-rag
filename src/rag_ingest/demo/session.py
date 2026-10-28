@@ -284,6 +284,35 @@ class DemoSession:
         """
         self.registry().register(contract)
 
+    def adopt_with_gate(self, contract, cases):
+        """Run the adoption gate; register only on a full pass.
+
+        The cases are about the contract's semantics (does max>=min hold? does
+        the enum bite?), not about span arithmetic, so each case's context is
+        its own claimed values joined into the span text: the gate re-derives
+        from a buffer where every claimed value is verbatim. A failed adoption
+        leaves the registry untouched and returns the falsifications.
+        """
+        from rag_ingest.docmodel import Element, RawDocument
+        from rag_ingest.grounding import GroundingGate
+        from rag_ingest.shapes import adopt_contract
+
+        raw, _ = RawDocument.from_elements(
+            f"adoption:{contract.name}",
+            [
+                Element(
+                    element_id="e1",
+                    kind=ElementKind.PARAGRAPH,
+                    page=1,
+                    text="\n".join(
+                        " ".join(str(v) for v in case.values.values()) for case in cases
+                    ),
+                )
+            ],
+        )
+        gate = GroundingGate(raw, shapes=self.registry())
+        return adopt_contract(gate, self.registry(), contract, cases)
+
     def check_against_shape(self, shape_name: str, text: str, values: dict[str, str]):
         """Verify a new chunk's values against an adopted shape.
 
