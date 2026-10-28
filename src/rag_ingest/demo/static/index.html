@@ -412,19 +412,54 @@ async function proposeShape(shape) {
       <table style="margin-bottom:8px"><tbody>${fieldRows}</tbody></table>
       <div class="meta" style="margin-bottom:4px">Evidence — each field was seen at these values in the source:</div>
       ${evidenceRows}
-      <div class="row" style="margin-top:10px;gap:8px">
-        <button class="primary" onclick="adoptShape()">Adopt (gate runs first)</button>
+      <div class="meta" style="margin-top:10px;margin-bottom:4px">Adoption cases — the gate runs these before registering. Each case asserts what the gate MUST do:</div>
+      <div class="mono" style="font-size:11px;margin-bottom:6px">case 1: every field claimed, must verify</div>
+      <div class="mono" style="font-size:11px;margin-bottom:8px">case 2: inverted range (swap the two numbers), must be refused</div>
+      <div class="row" style="gap:8px">
+        <button class="primary" onclick="adoptShape()">Adopt (gate runs the cases)</button>
       </div>
-      <div class="meta" style="margin-top:6px">Adoption registers the contract immediately — no restart. The gate verifies values through the same span re-derivation as every built-in shape.</div>
+      <div class="meta" style="margin-top:6px">Adoption registers the contract immediately on a full pass — no restart. The gate verifies values through the same span re-derivation as every built-in shape. A failed case blocks registration and shows why.</div>
       <div id="adopt-status"></div>
     </div>`);
   window._pendingProposal = proposal;
+}
+
+function buildAdoptionCases(proposal) {
+  // Case 1: every required field claimed with a plausible value; must verify.
+  // Case 2: the first range pair inverted; must be refused. This is the
+  // falsification direction -- if the gate passes an inverted range, the
+  // contract does not do what it declared, and adoption blocks.
+  const positive = {};
+  const inverted = {};
+  const rangeFields = proposal.fields.filter(f => f.min_ref);
+  for (const f of proposal.fields) {
+    if (f.min_ref) continue;
+    const sample = f.name.endsWith('_min') ? '50'
+      : f.name.endsWith('_max') ? '70'
+      : f.values && f.values.length ? f.values[0]
+      : f.kind === 'number' ? '100' : 'sample-' + f.name;
+    positive[f.name] = sample;
+    inverted[f.name] = sample;
+  }
+  if (rangeFields.length) {
+    const minName = rangeFields[0].min_ref;
+    const maxName = rangeFields[0].name;
+    if (positive[minName] !== undefined) {
+      inverted[minName] = '90';
+      inverted[maxName] = '50';  // inverted: gate MUST refuse
+    }
+  }
+  return [
+    { ...positive, expected: 'verified' },
+    ...(rangeFields.length ? [{ ...inverted, expected: 'mismatch' }] : []),
+  ];
 }
 
 async function adoptShape() {
   const proposal = window._pendingProposal;
   if (!proposal) return;
   const status = $('#adopt-status');
+  const cases = buildAdoptionCases(proposal);
   const response = await fetch('/api/adopt', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -434,19 +469,35 @@ async function adoptShape() {
         tier: proposal.tier_declared,
         fields: proposal.fields,
       },
+      cases,
     }),
   });
   if (response.status === 409) {
-    status.innerHTML = '<div class="meta" style="margin-top:8px">This shape is already registered.</div>';
+    const err = await response.json();
+    const detail = typeof err.detail === 'string'
+      ? err.detail
+      : (err.detail && err.detail.message) || 'adoption blocked';
+    let failureHtml = '';
+    if (err.detail && err.detail.failed_cases) {
+      failureHtml = err.detail.failed_cases.map(fc =>
+        `<div class="mono" style="font-size:11px;color:var(--bad)">
+           case ${fc.case_index}: expected ${esc(fc.expected)}, gate said ${esc(fc.got)}
+           <span class="muted">(${esc(Object.values(fc.values).join(', '))})</span>
+         </div>`).join('');
+    }
+    status.innerHTML = `
+      <div class="err" style="margin-top:8px">Adoption blocked — the contract failed its cases.</div>
+      ${failureHtml}
+      <div class="meta" style="margin-top:6px">Fix the schema or the cases and try again. The registry is untouched.</div>`;
     return;
   }
   if (response.status === 422) {
     const err = await response.json();
-    status.innerHTML = `<div class="err" style="margin-top:8px">Invalid contract: ${esc(err.detail || '')}</div>`;
+    status.innerHTML = `<div class="err" style="margin-top:8px">Invalid: ${esc(err.detail || '')}</div>`;
     return;
   }
   const body = await response.json();
-  status.innerHTML = `<div class="pill ok" style="margin-top:8px">✓ ${esc(body.name)} registered (${esc(body.tier)}) — effective immediately</div>`;
+  status.innerHTML = `<div class="pill ok" style="margin-top:8px">✓ ${esc(body.name)} registered (${esc(body.tier)}) — cases passed, effective immediately</div>`;
 }
 
 function renderLabels(corrections) {
