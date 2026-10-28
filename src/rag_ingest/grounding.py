@@ -19,12 +19,20 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag_ingest.docmodel import RawDocument
+from rag_ingest.gate_tier import (
+    MIN_EXTRACTED_FIELDS,
+    MIN_FIELDS_BY_TIER,
+    assert_tier_applies,
+    select_gate_tier,
+)
 from rag_ingest.ontology import (
     AbstainReason,
     Extraction,
     FieldAbstention,
     FieldValue,
+    GateTier,
     InvoiceHeader,
+    ProseKnowledge,
     Unclassified,
 )
 
@@ -36,15 +44,6 @@ OCR_CONFUSIONS = str.maketrans({"l": "1", "I": "1", "O": "0", "S": "5", "B": "8"
 _WHITESPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[,\s]")
 _CURRENCY = re.compile(r"[₩$€£¥]")
-
-
-#: Minimum grounded fields before an extraction counts as verified.
-#:
-#: Not a tunable knob to lower when the queue gets busy: this is the line
-#: between "we know what this chunk is" and "we found one thing that happened to
-#: match". Two, because an identifier alone identifies nothing about the content
-#: a query would retrieve it for.
-MIN_EXTRACTED_FIELDS = 2
 
 
 class GroundingStatus(StrEnum):
@@ -167,9 +166,24 @@ class GroundingGate:
     def __init__(self, raw: RawDocument) -> None:
         self._raw = raw
 
-    def check(self, extraction: Extraction) -> GroundingResult:
+    def check(
+        self, extraction: Extraction, *, tier: GateTier | None = None
+    ) -> GroundingResult:
+        """Check one extraction against the raw source.
+
+        ``tier`` defaults to the bar implied by the extraction's own ontology
+        type. Passing it explicitly is for callers that must record which bar was
+        applied; it is not a knob for relaxing a typed record, which
+        ``assert_tier_applies`` refuses.
+        """
         if isinstance(extraction, Unclassified):
             return self._check_unclassified(extraction)
+
+        resolved_tier = tier if tier is not None else select_gate_tier(extraction)
+        assert_tier_applies(resolved_tier, extraction)
+
+        if isinstance(extraction, ProseKnowledge):
+            return self._check_prose(extraction, resolved_tier)
 
         issues: list[Issue] = []
         normalized = False
@@ -239,7 +253,7 @@ class GroundingGate:
         # but carries none. The threshold is a required-evidence rule, not a
         # style preference: a wrong or hollow record is worse than a queued one.
         extracted = len(fields) - abstained
-        if extracted < MIN_EXTRACTED_FIELDS:
+        if extracted < MIN_FIELDS_BY_TIER[resolved_tier]:
             return GroundingResult(
                 status=GroundingStatus.INCOMPLETE,
                 issues=tuple(issues),
@@ -250,6 +264,47 @@ class GroundingGate:
             status=GroundingStatus.GROUNDED,
             issues=tuple(issues),
             needed_normalization=normalized,
+        )
+
+    def _check_prose(
+        self, extraction: ProseKnowledge, tier: GateTier
+    ) -> GroundingResult:
+        """The quoted text must appear verbatim at the span it cites.
+
+        One field, so a LENIENT bar is satisfied by construction -- the real content
+        of this check is ``_check_field``. Do not read a GROUNDED result here as
+        "this is correct": it means "this document says this at this place",
+        nothing more. That distinction is why ``ChunkRecord`` stamps the tier
+        alongside the verified flag.
+
+        The tier is still applied rather than assumed. Asking for a two-field bar on
+        a one-field shape yields INCOMPLETE instead of silently receiving the lenient
+        verdict, so a caller cannot get a relaxed answer by accident.
+        """
+        issue, did_normalize = self._check_field("text", extraction.text)
+        if issue is not None:
+            return GroundingResult(
+                status=issue.status,
+                issues=(issue,),
+                needed_normalization=did_normalize,
+            )
+        required = MIN_FIELDS_BY_TIER[tier]
+        if required > 1:
+            return GroundingResult(
+                status=GroundingStatus.INCOMPLETE,
+                issues=(
+                    Issue(
+                        field="text",
+                        status=GroundingStatus.INCOMPLETE,
+                        message=(
+                            f"quoted prose supplies 1 field; {tier.value} requires {required}"
+                        ),
+                    ),
+                ),
+                needed_normalization=did_normalize,
+            )
+        return GroundingResult(
+            status=GroundingStatus.GROUNDED, needed_normalization=did_normalize
         )
 
     def _check_field(
@@ -331,6 +386,7 @@ class GroundingGate:
         return GroundingResult(status=GroundingStatus.UNCLASSIFIED)
 
 __all__ = [
+    "MIN_EXTRACTED_FIELDS",
     "GroundingGate",
     "GroundingResult",
     "GroundingStatus",

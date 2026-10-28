@@ -100,6 +100,10 @@ class IngestView(BaseModel):
 class DemoSession:
     """Documents, review queue, and the T2 health signal for one demo run."""
 
+    # Deliberately not LayeredExtractor, unlike the CLI's corpus mode. The demo
+    # exists to show a verdict per region -- green entered retrieval, red withheld.
+    # Admitting every prose chunk as a verbatim quote would paint the whole page
+    # green and demonstrate nothing. Use the corpus run to exercise the LENIENT tier.
     extractor: object = field(default_factory=TemplateExtractor)
     adjudicator: object | None = None
     producer: object | None = None

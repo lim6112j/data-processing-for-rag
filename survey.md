@@ -819,9 +819,11 @@ rejects all of them. A prose sentence that is verbatim in the source may be
 wrong, but the pipeline still conveys "this document said this", which is what
 retrieval is for. It is quoting, not summarising.
 
-### Sketch: gate strictness tiers
+### Gate strictness tiers
 
-Not implemented. Recorded so the idea is not lost.
+**Implemented** in `src/rag_ingest/gate_tier.py` after the measurement below was
+taken. The prediction in the next paragraph held: `unclassified` was 81% of a real
+646-page manual, so the tier was the next thing to build.
 
 | Tier | Pass condition | On failure |
 |---|---|---|
@@ -829,16 +831,23 @@ Not implemented. Recorded so the idea is not lost.
 | `STANDARD` | grounding + required fields | quarantine |
 | `LENIENT` | **grounding only** (value is verbatim in the source) | quarantine |
 
-Tier assignment should come from the declared document type or the ontology
-type (`InvoiceHeader` → STRICT, `ProseKnowledge` → LENIENT). **An LLM classifier
-is the wrong mechanism**: the documented failure mode is that a misclassified
-STRICT document silently becomes LENIENT, which is exactly the silent-corruption
-path this repo exists to prevent.
+Tier assignment comes from the ontology type the extractor claimed
+(`InvoiceHeader` → STRICT, `ReportSection` → STANDARD, `ProseKnowledge` →
+LENIENT). **An LLM classifier is the wrong mechanism**: the documented failure
+mode is that a misclassified STRICT document silently becomes LENIENT, which is
+exactly the silent-corruption path this repo exists to prevent. The mapping is a
+lookup table and `assert_tier_applies` raises if a LENIENT bar is applied to a
+typed record, so that direction cannot be expressed.
+
+Arithmetic is still not implemented, so STRICT and STANDARD apply identical
+checks today. The enum is complete so the arithmetic checks attach to a tier when
+they arrive, rather than triggering a silent reclassification later.
 
 This also fixes something the survey flagged: precision targets should be
 **per class and per tier**, not one global 0.85. The Statistics Canada 20–30%
 hit rate is a statement about *structured* editing, and does not transfer to
-knowledge chunks.
+knowledge chunks. `ChunkRecord.gate_tier` records which bar produced each verdict
+for exactly this reason.
 
 ### Not yet measured — do this before building it
 
@@ -866,6 +875,34 @@ And the numbers to read, in this order:
 **If `unclassified` dominates (say >60%), the tier design is the next thing to
 build. If it is small, it is not a priority and the arithmetic checks matter
 more.**
+
+### Answer (2026-10-28): 81%, so it was built
+
+Run on FAA AC 43.13-1B (646 pages, 754 chunks, `corpus/README.md`):
+
+| Configuration | verified | unclassified |
+|---|---|---|
+| before the tier, `TemplateExtractor` | 0 | 613/754 (81%) |
+| after the tier, `LayeredExtractor` | 722/754 (96%) |
+
+The 32 remaining quarantines are all `multi_page_span` — chunks that span a page
+boundary and therefore cannot be cited through the single-page `ProvenanceRef`
+that a LENIENT check requires. That is an honest refusal, not a defect, but it is
+the obvious next increment if the number matters.
+
+Two things this measurement did **not** establish, and must not be read into it:
+
+1. **96% is not a quality figure.** LENIENT admits quotation fidelity, which prose
+   satisfies almost by construction. It says the text is in the source, not that
+   it is useful, current, or correct.
+2. **The DB/knowledge split is still not implemented.** All 172 table chunks in
+   the manual — including `TABLE 7-1`, the torque specification table — are now
+   admitted as `ProseKnowledge`. They are retrievable by text search and quotable
+   with a citation, but they are **not rows**: nothing can aggregate them, and the
+   `2200-3300*` footnote qualifier is preserved verbatim without being resolved.
+   Routing those to STRICT and a database is the part the tier does not do, and
+   the arithmetic reconciliation listed as conclusion 1 below is the missing piece
+   that would make it meaningful.
 
 ## Other design conclusions reached while building
 

@@ -32,6 +32,7 @@ from rag_ingest.ontology import (
     FieldAbstention,
     FieldValue,
     InvoiceHeader,
+    ProseKnowledge,
     Unclassified,
 )
 
@@ -249,8 +250,101 @@ class NoExtractor(BaseModel):
         return None
 
 
+class ProseExtractor:
+    """Quotes the chunk verbatim, with the span that contains it.
+
+    Mechanical on purpose: no model, no regex, no interpretation. The only claim
+    it makes is "this text is what the source says at this span", which is
+    exactly what a LENIENT gate can check. Anything stronger would be a claim
+    this extractor cannot support.
+
+    A chunk spanning pages is declined. ``ProvenanceRef`` cites one page, so a
+    multi-page chunk cannot be quoted through a single resolvable span, and
+    quoting only its first page would quietly understate what was admitted. On a
+    646-page manual 96% of chunks are single-page (``corpus/README.md``), so the
+    honest refusal costs little; the alternative costs the meaning of "verified".
+    """
+
+    def extract(self, chunk: Chunk) -> Extraction | None:
+        text = chunk.text.strip()
+        if not text:
+            return None
+        if chunk.page_start != chunk.page_end:
+            return Unclassified(
+                observed_shape="multi_page_span",
+                provenance=_whole_chunk_span(chunk),
+            )
+        span = _chunk_span(chunk)
+        if span is None:
+            return Unclassified(
+                observed_shape=_shape_hint(chunk),
+                provenance=_whole_chunk_span(chunk),
+            )
+        return ProseKnowledge(text=FieldValue(value=text, provenance=span))
+
+
+class LayeredExtractor:
+    """Tries a typed extractor, then falls back to verbatim prose.
+
+    The fallback is what makes the LENIENT tier reachable at all: without it the
+    only typed extractor in the tree knows one invoice shape, so every prose chunk
+    is ``unclassified`` and the gate admits nothing from a manual.
+
+    One deliberate exception. When the template says the text *looks like* an
+    invoice header but parsed nothing (``invoice_header_unparseable``), prose does
+    not take over. The reviewer should be asked what the document should look
+    like -- a knowledgeable record is not an answer to that question, and
+    burying it under a verbatim quote would hide a template that no longer
+    matches.
+    """
+
+    def __init__(
+        self, primary: Extractor | None = None, fallback: Extractor | None = None
+    ) -> None:
+        self._primary = primary if primary is not None else TemplateExtractor()
+        self._fallback = fallback if fallback is not None else ProseExtractor()
+
+    def extract(self, chunk: Chunk) -> Extraction | None:
+        first = self._primary.extract(chunk)
+        if not isinstance(first, Unclassified):
+            return first
+        if first.observed_shape == "invoice_header_unparseable":
+            return first
+        second = self._fallback.extract(chunk)
+        return first if second is None else second
+
+
+def _chunk_span(chunk: Chunk):
+    """One span covering the whole chunk, or None when it cannot be cited.
+
+    Requires every segment on one page. ``_whole_chunk_span`` returns the first
+    segment only, which is right for reporting what a region looked like but
+    wrong for quoting: it would verify the head of a chunk and silently ignore
+    the rest.
+    """
+    from rag_ingest.docmodel import ProvenanceRef
+
+    if not chunk.segments:
+        return None
+    pages = {segment.page for segment in chunk.segments}
+    if len(pages) != 1:
+        return None
+    first, last = chunk.segments[0], chunk.segments[-1]
+    if last.raw_end <= first.raw_start:
+        return None
+    return ProvenanceRef(
+        page=first.page,
+        char_start=first.raw_start,
+        char_end=last.raw_end,
+        element_id=first.element_id,
+        bbox=chunk.bbox,
+    )
+
+
 __all__ = [
     "Extractor",
+    "LayeredExtractor",
     "NoExtractor",
+    "ProseExtractor",
     "TemplateExtractor",
 ]

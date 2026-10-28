@@ -160,7 +160,7 @@ def _ingest_corpus(
     which is the only pairing that produces genuinely informative disagreements.
     """
     from rag_ingest.adapters.openrouter import OpenRouterAdjudicator
-    from rag_ingest.extractors import TemplateExtractor
+    from rag_ingest.extractors import LayeredExtractor
     from rag_ingest.ingest_runner import DocumentSource, IngestRunner, describe
 
     primary_name, primary_parse = _select_parser(parser)
@@ -212,7 +212,11 @@ def _ingest_corpus(
     )
 
     runner = IngestRunner(
-        extractor=TemplateExtractor() if extract else _DisabledExtraction(),
+        # Layered by default: invoice extraction first, verbatim prose as the
+        # fallback. Without the fallback the LENIENT tier is unreachable -- the
+        # only typed extractor knows one invoice shape and a manual contains none,
+        # which measured 0 admissions from 754 chunks (corpus/README.md).
+        extractor=LayeredExtractor() if extract else _DisabledExtraction(),
         adjudicator=OpenRouterAdjudicator(),
         producer=producer,
         today=today,

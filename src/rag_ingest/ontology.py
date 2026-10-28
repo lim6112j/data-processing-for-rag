@@ -108,7 +108,50 @@ class ReportSection(BaseModel):
     primary_finding: GroundedField
 
 
-Extraction = InvoiceHeader | ReportSection | Unclassified
+class ProseKnowledge(BaseModel):
+    """Shape 3: narrative content, quoted verbatim from the source.
+
+    Admission for this shape is LENIENT: the only check is that the quoted text
+    appears verbatim at the span it cites. That is still a real check -- it
+    catches chunker damage, truncation and span drift -- but be precise about
+    what it proves. It verifies **fidelity of quotation**, not correctness.
+
+    survey.md: "A prose sentence that is verbatim in the source may be wrong, but
+    the pipeline still conveys 'this document said this', which is what retrieval
+    is for. It is quoting, not summarising." Never report a LENIENT pass as
+    "verified" without saying which tier it passed.
+
+    This shape exists because the alternative was measured and is unacceptable:
+    a 646-page manual produced 754 chunks and 0 admissions, every one rejected
+    as ``unclassified`` (``corpus/README.md``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    doc_type: Literal["prose"] = "prose"
+    text: GroundedField
+
+
+class GateTier(StrEnum):
+    """How strict the grounding gate was for one record.
+
+    Lives here rather than in ``gate_tier`` to keep ``ChunkRecord`` (which stamps
+    it) free of a circular import. The selection logic -- which must inspect the
+    extraction types below -- lives in ``gate_tier``.
+
+    STRICT and STANDARD currently apply the same checks. That is deliberate
+    honesty rather than an oversight: the arithmetic and range checks that are
+    supposed to separate them are the highest-value missing piece per survey.md
+    and are not built yet. The enum is complete so the checks attach to a tier
+    when they arrive, instead of a silent reclassification later.
+    """
+
+    STRICT = "strict"
+    STANDARD = "standard"
+    LENIENT = "lenient"
+
+
+Extraction = InvoiceHeader | ReportSection | ProseKnowledge | Unclassified
 
 
 class ChunkRecord(BaseModel):
@@ -124,6 +167,11 @@ class ChunkRecord(BaseModel):
     ontology_version: str = ONTOLOGY_VERSION
     pipeline_version: str = PIPELINE_VERSION
     extraction: Extraction | None = None
+    #: Which bar this record was held to. A ``verified`` flag without this is
+    #: ambiguous: "quoted verbatim" and "grounded, complete and consistent" are
+    #: not the same claim, and mixing them silently is the ambiguity this project
+    #: exists to remove.
+    gate_tier: GateTier | None = None
 
 
 __all__ = [
@@ -134,8 +182,10 @@ __all__ = [
     "Extraction",
     "FieldAbstention",
     "FieldValue",
+    "GateTier",
     "GroundedField",
     "InvoiceHeader",
+    "ProseKnowledge",
     "ReportSection",
     "Unclassified",
 ]

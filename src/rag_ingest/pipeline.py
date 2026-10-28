@@ -30,6 +30,7 @@ from rag_ingest.escalation import (
     ReviewItem,
     ReviewQueue,
 )
+from rag_ingest.gate_tier import select_gate_tier
 from rag_ingest.grounding import GroundingGate, GroundingResult, GroundingStatus
 from rag_ingest.ontology import (
     ONTOLOGY_VERSION,
@@ -37,6 +38,7 @@ from rag_ingest.ontology import (
     AbstainReason,
     ChunkRecord,
     Extraction,
+    GateTier,
 )
 from rag_ingest.tiering import Tier, TierDecision, select_tier
 
@@ -135,8 +137,15 @@ class IngestPipeline:
 
         for chunk in chunks:
             extraction = self._extractor.extract(chunk)
-            result = gate.check(extraction) if extraction is not None else None
-            record = _to_record(chunk, extraction, result)
+            # The bar is decided by what the extractor claims it found, never by a
+            # model and never by the caller. A false InvoiceHeader claim therefore
+            # gets the *strictest* bar, so a mislabelled chunk is more likely to be
+            # quarantined, not less -- the failure direction this design requires.
+            tier = select_gate_tier(extraction) if extraction is not None else None
+            result = (
+                gate.check(extraction, tier=tier) if extraction is not None else None
+            )
+            record = _to_record(chunk, extraction, result, tier)
 
             if result is not None and result.verified:
                 verified.append(record)
@@ -518,15 +527,24 @@ def _apply_adjudication(
 
 
 def _to_record(
-    chunk: Chunk, extraction: Extraction | None, result: GroundingResult | None
+    chunk: Chunk,
+    extraction: Extraction | None,
+    result: GroundingResult | None,
+    tier: GateTier | None = None,
 ) -> ChunkRecord:
     return _chunk_to_record(
-        chunk, verified=bool(result is not None and result.verified), extraction=extraction
+        chunk,
+        verified=bool(result is not None and result.verified),
+        extraction=extraction,
+        tier=tier,
     )
 
 
 def _chunk_to_record(
-    chunk: Chunk, verified: bool, extraction: Extraction | None
+    chunk: Chunk,
+    verified: bool,
+    extraction: Extraction | None,
+    tier: GateTier | None = None,
 ) -> ChunkRecord:
     return ChunkRecord(
         chunk_id=chunk.chunk_id,
@@ -537,6 +555,7 @@ def _chunk_to_record(
         ontology_version=ONTOLOGY_VERSION,
         pipeline_version=PIPELINE_VERSION,
         extraction=extraction,
+        gate_tier=tier,
     )
 
 

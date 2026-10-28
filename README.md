@@ -1,6 +1,6 @@
 # rag-ingest
 
-**Status:** working prototype. 314 tests, runs real PDFs end-to-end
+**Status:** working prototype. 345 tests, runs real PDFs end-to-end
 through Docling + pdfplumber with OpenRouter as the adjudication backend, and
 ships an interactive demo server.
 
@@ -39,8 +39,23 @@ it stops being right.
 | T2 | OpenRouter adjudicator, consulted only on parser disagreement, guarded by a circuit breaker |
 | T3 | Chunk-scoped review queue with owner-correction labels |
 
+T1 applies one of three bars, chosen from the ontology type the extractor claimed
+and never from a model:
+
+| Gate tier | Bar | Applies to |
+|---|---|---|
+| `STRICT` | grounding + required evidence | `InvoiceHeader` |
+| `STANDARD` | grounding + required evidence | `ReportSection` |
+| `LENIENT` | grounding only — the text is verbatim at the span it cites | `ProseKnowledge` |
+
+`STRICT` and `STANDARD` currently apply the same checks because the arithmetic and
+range checks that are meant to separate them are not built yet. `LENIENT` verifies
+**fidelity of quotation, not correctness**: a pass means "this document says this at
+this place". Every record stamps its tier, so the two claims are never conflated.
+A LENIENT bar on a typed record raises rather than quietly admitting it.
+
 ```bash
-uv run pytest                          # 314 tests, no network
+uv run pytest                          # 345 tests, no network
 uv run rag-demo                        # interactive UI on :8765
 uv run rag-goldset                     # decision-level gold set (6/6)
 uv run rag-goldset --corpus ./pdfs     # real PDFs, per-document accounting
@@ -459,6 +474,7 @@ src/rag_ingest/
     pdfplumber.py PDF -> Element/RawDocument, geometric tables + page images
     openrouter.py T2 backend: structured output, image input, degrades safely
   pipeline.py     T0 -> T1 -> T2 -> quarantine orchestration
+  gate_tier.py    which bar a claimed record must clear, from its ontology type
   goldset.py      gold-set loader, replay extractor, decision checker
   cli.py          `rag-goldset`
   demo/
@@ -468,14 +484,14 @@ src/rag_ingest/
     producers.py    scripted second reading, so T2 is reachable in a demo
     fake_adjudicator.py  scripted T2 -- shape of the path, not judgement
     static/index.html    the UI
-tests/            314 tests
+tests/            345 tests
 goldset/cases.yaml  adversarial cases, each asserting a decision
 ```
 
 ## Run it
 
 ```bash
-uv run pytest                                 # 314 tests
+uv run pytest                                 # 345 tests
 uv run pytest -m live                         # one real OpenRouter call
 uv run pytest --cov=rag_ingest                # coverage
 uv run rag-goldset                            # gold-set report
