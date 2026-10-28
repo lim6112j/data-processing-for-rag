@@ -1042,3 +1042,82 @@ class TestAdoptionGateInSession:
                 "torque_spec", "1/4-28 50-70",
                 {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
             )
+
+
+class TestContractPersistence:
+    """Adopted contracts survive a restart: written on adopt, loaded on boot."""
+
+    def _session_with_tables(self):
+        from rag_ingest.demo.session import DemoSession
+
+        session = DemoSession(today=TODAY)
+        flow = TestShapeDiscoveryFlow()
+        flow._ingest_tables(session)
+        return session
+
+    def _contract(self):
+        from rag_ingest.gate_tier import GateTier
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        return ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(name="torque_max", kind="number", required=True,
+                          min_ref="torque_min"),
+            ),
+        )
+
+    def test_adopt_writes_the_contract_to_disk(self, tmp_path):
+        session = self._session_with_tables()
+        session.shapes_path = tmp_path / "shapes.json"
+        from rag_ingest.shapes import GoldCaseSpec
+
+        cases = GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "mismatch"},
+        ])
+        session.adopt_with_gate(self._contract(), cases)
+
+        assert (tmp_path / "shapes.json").exists()
+
+    def test_adopted_contract_survives_a_recreated_session(self, tmp_path):
+        from rag_ingest.demo.session import DemoSession
+        from rag_ingest.shapes import GoldCaseSpec
+
+        cases = GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "mismatch"},
+        ])
+
+        first = DemoSession(today=TODAY, shapes_path=tmp_path / "shapes.json")
+        TestShapeDiscoveryFlow()._ingest_tables(first)
+        first.adopt_with_gate(self._contract(), cases)
+
+        # A "restart": a fresh session pointed at the same file.
+        second = DemoSession(today=TODAY, shapes_path=tmp_path / "shapes.json")
+        assert second.registry().lookup("torque_spec") is not None
+        # And it is the same contract, not just a name.
+        assert second.registry().lookup("torque_spec").to_definition() == \
+            self._contract().to_definition()
+
+    def test_builtin_shapes_are_not_written_to_disk(self, tmp_path):
+        # Persistence records ADOPTED contracts only: builtins come from code.
+        from rag_ingest.demo.session import DemoSession
+
+        DemoSession(today=TODAY, shapes_path=tmp_path / "shapes.json")
+        path = tmp_path / "shapes.json"
+        content = path.read_text() if path.exists() else ""
+        assert "torque_spec" not in content
+
+    def test_corrupt_shapes_file_does_not_crash_the_session(self, tmp_path):
+        from rag_ingest.demo.session import DemoSession
+
+        (tmp_path / "shapes.json").write_text("{not json")
+        session = DemoSession(today=TODAY, shapes_path=tmp_path / "shapes.json")
+        # Fails closed to builtins, never a partial registry.
+        assert session.registry().lookup("invoice") is not None

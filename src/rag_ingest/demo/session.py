@@ -9,8 +9,10 @@ deployment -- stated once so it is not mistaken for a design decision.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -131,7 +133,29 @@ class DemoSession:
     #: chunks after the fact. The view records decisions; the outcome holds
     #: the records discovery reads.
     outcomes: dict[str, IngestOutcome] = field(default_factory=dict)
+    #: Adopted contracts are persisted here (JSON of ``to_definition`` payloads)
+    #: and reloaded on construction -- adoption must survive a restart.
+    shapes_path: Path | None = None
     _shapes: ShapeRegistry | None = None
+
+    def __post_init__(self) -> None:
+        if self.shapes_path is not None and self.shapes_path.exists():
+            try:
+                payload = json.loads(self.shapes_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                # A corrupt file must not brick the session: fail closed to
+                # builtins rather than start with a partial registry.
+                return
+            if isinstance(payload, list):
+                from pydantic import ValidationError
+
+                from rag_ingest.shapes import ShapeContract
+
+                for definition in payload:
+                    try:
+                        self.registry().register(ShapeContract.from_definition(definition))
+                    except (ValueError, ValidationError):
+                        continue  # skip the bad entry, keep the good ones
 
     # -- ingestion --------------------------------------------------------
 
@@ -311,7 +335,30 @@ class DemoSession:
             ],
         )
         gate = GroundingGate(raw, shapes=self.registry())
-        return adopt_contract(gate, self.registry(), contract, cases)
+        result = adopt_contract(gate, self.registry(), contract, cases)
+        if result.registered:
+            self._persist_shapes()
+        return result
+
+    def _persist_shapes(self) -> None:
+        from rag_ingest.shapes import ShapeRegistry
+
+        """Write every adopted contract to disk.
+
+        Builtins are excluded: they come from code and must not be duplicated
+        into a file that would then shadow future code changes. Only contracts
+        adopted through the gate are recorded.
+        """
+        if self.shapes_path is None:
+            return
+        builtin_names = {c.name for c in ShapeRegistry.with_builtins()._contracts.values()}
+        adopted = [
+            c.to_definition()
+            for name, c in self.registry()._contracts.items()
+            if name not in builtin_names
+        ]
+        self.shapes_path.parent.mkdir(parents=True, exist_ok=True)
+        self.shapes_path.write_text(json.dumps(adopted, indent=2))
 
     def check_against_shape(self, shape_name: str, text: str, values: dict[str, str]):
         """Verify a new chunk's values against an adopted shape.

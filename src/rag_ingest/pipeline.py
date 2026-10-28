@@ -41,6 +41,8 @@ from rag_ingest.ontology import (
     Extraction,
     GateTier,
 )
+from rag_ingest.table_rows import RowObservation
+from rag_ingest.table_rows import row_observations as _split_rows
 from rag_ingest.tiering import Tier, TierDecision, select_tier
 
 
@@ -55,6 +57,10 @@ class IngestOutcome:
     tier_decisions: tuple[tuple[str, TierDecision], ...]
     #: T2 decisions taken during this document, for the label set.
     adjudications: tuple[tuple[AdjudicationQuestion, AdjudicationDecision], ...] = ()
+    #: Row-level observations from quarantined TABLE chunks. Discovery reads
+    #: these so a 14-row table is 14 candidate rows, not one blob -- row
+    #: recurrence is the signal a shape declaration should be asked about.
+    row_observations: tuple[RowObservation, ...] = ()
 
 
 class Adjudicator:
@@ -110,6 +116,9 @@ class IngestPipeline:
     ) -> IngestOutcome:
         tier_decisions: list[tuple[str, TierDecision]] = []
         extractable: list[Element] = []
+        # Row routing needs the elements WITH resolved char offsets -- the
+        # caller's list is the located form produced by from_elements.
+        self._located_elements = list(elements)
         pre_escalations: list[Element] = []
 
         for element in elements:
@@ -202,6 +211,7 @@ class IngestPipeline:
                 )
             )
 
+        row_observations = self._route_table_rows(quarantined, chunks)
         return IngestOutcome(
             doc_id=raw.doc_id,
             verified_chunks=tuple(verified),
@@ -209,7 +219,30 @@ class IngestPipeline:
             review_items=tuple(review_items),
             tier_decisions=tuple(tier_decisions),
             adjudications=tuple(adjudications),
+            row_observations=row_observations,
         )
+
+    def _route_table_rows(
+        self, quarantined: list[ChunkRecord], chunks: list[Chunk]
+    ) -> tuple[RowObservation, ...]:
+        """Row observations from table chunks that ended up quarantined.
+
+        Only quarantined tables are routed: a verified table was already
+        understood, and re-deriving rows for it would double-count the same
+        content in discovery. The chunk's records identify which chunks
+        failed; the chunk itself supplies the row text and spans.
+        """
+        quarantined_ids = {r.chunk_id for r in quarantined}
+        routed: list[RowObservation] = []
+        for chunk in chunks:
+            if chunk.chunk_id in quarantined_ids and chunk.kind.value == "table":
+                routed.extend(_split_rows(chunk, self._elements_by_chunk(chunk)))
+        return tuple(routed)
+
+    def _elements_by_chunk(self, chunk: Chunk) -> list[Element]:
+        """The chunk's own elements, with resolved offsets, in order."""
+        by_id = {e.element_id: e for e in self._located_elements}
+        return [by_id[eid] for eid in chunk.element_ids if eid in by_id]
 
     def _review_item(
         self,

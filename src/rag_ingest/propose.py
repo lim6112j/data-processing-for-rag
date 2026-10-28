@@ -64,6 +64,25 @@ class Proposal:
         )
 
 
+def classify_cell(cell: str) -> str:
+    """One cell's kind, per the same grammar the proposer reads rows with.
+
+    Exposed so discovery can signature rows without duplicating the
+    classification -- a cluster keyed on a different grammar than the
+    proposer reads would propose against its own evidence.
+    """
+    cell = (cell or "").strip()
+    if cell == "":
+        return "empty"
+    if _RANGE.match(cell):
+        return "range"
+    if _THREAD.match(cell) and "/" in cell:
+        return "thread"
+    if _NUMBER.match(cell):
+        return "number"
+    return "text"
+
+
 def propose(
     cluster_shape: str,
     sample_rows: tuple[tuple[str, ...], ...],

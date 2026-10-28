@@ -117,4 +117,59 @@ def _first_page(record: ChunkRecord) -> int:
     return 1
 
 
-__all__ = ["DiscoveryReport", "ShapeCluster", "discover"]
+__all__ = ["DiscoveryReport", "ShapeCluster", "discover", "discover_from_rows"]
+
+
+def discover_from_rows(rows: tuple) -> DiscoveryReport:
+    """Cluster row observations by their cell-kind signature.
+
+    A row's signature is the per-cell kind sequence (thread / range / number /
+    text), classified by the same grammar the proposer uses -- so what
+    discovery counts as recurring is exactly what the proposer can read.
+    This keeps rows and blob-chunks in separate cluster spaces: a row shape
+    and a prose shape are different conversations with the owner.
+    """
+    from rag_ingest.propose import classify_cell
+
+    by_signature: Counter[str] = Counter()
+    pages: dict[str, set[int]] = {}
+    documents: dict[str, set[str]] = {}
+    samples: dict[str, str] = {}
+
+    # Column-major first: a column's dominant kind defines its role. This is
+    # what makes "8-36" a thread and "12-15" a range even though both are
+    # number-dash-number -- the thread column is full of slash-or-dash thread
+    # tokens, the torque column is full of ranges. Row-kind classification
+    # alone cannot tell them apart, and guessing per-cell would put sibling
+    # values of one column into two clusters.
+    from collections import defaultdict
+
+    column_kinds: dict[int, Counter] = defaultdict(Counter)
+    for row in rows:
+        for col, cell in enumerate(row.cells):
+            column_kinds[col][classify_cell(cell)] += 1
+    column_roles = {
+        col: kinds.most_common(1)[0][0] if kinds else "empty"
+        for col, kinds in column_kinds.items()
+    }
+
+    for row in rows:
+        signature = "row:" + ",".join(
+            column_roles.get(col, "empty") for col in range(len(row.cells))
+        )
+        by_signature[signature] += 1
+        pages.setdefault(signature, set()).add(row.page)
+        documents.setdefault(signature, set()).add(row.doc_id)
+        samples.setdefault(signature, row.row_text.strip()[:120])
+
+    clusters = tuple(
+        ShapeCluster(
+            shape=signature,
+            chunks=count,
+            pages=len(pages[signature]),
+            documents=len(documents[signature]),
+            sample_text=samples.get(signature, ""),
+        )
+        for signature, count in by_signature.most_common()
+    )
+    return DiscoveryReport(clusters=clusters, unclassified_total=sum(by_signature.values()))
