@@ -82,9 +82,9 @@ parsers*; it never sees grounding failures and never verifies anything.
 - **Table → row routing**: DONE (`table_rows.py` — pipe-rendered rows,
   newline-packed cell expansion; FAA TABLE 7-1 routes to 25 rows, one
   signature, fully proposable)
-- **LLM proposer layer** (`propose.py`): for discovery clusters the
-  deterministic grammar cannot parse — must produce the same claim-with-evidence
-  shape as the grammar proposer, never guessed schemas
+- **LLM proposer layer**: DONE (`llm_propose.py` + session fallback — grammar
+  refusal falls back to the model; claims labelled source="llm", evidence
+  verified against cited rows, adoption gate unchanged)
 - **T2 repurposing**: OpenRouter tier could resolve data-quality claims
   (structural disagreements between parsers) — invariant #1 still holds
 - **Real Korean business corpus**: pipeline is proven only on FAA manuals and
