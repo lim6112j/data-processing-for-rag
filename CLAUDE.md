@@ -54,6 +54,16 @@ parsers*; it never sees grounding failures and never verifies anything.
 - `src/rag_ingest/demo/` — FastAPI demo (server, session, static UI)
 - `goldset/cases.yaml` — decision-level gold set cases
 
+## Supporting Modules (added by codebase onboarding)
+
+- `docmodel.py` — dependency-free element tree + provenance model (adapter boundary)
+- `extractors.py`, `candidates.py` — T0 regex extractors; dual-parse disagreement production for T2
+- `defects.py` — mechanical OCR-damage marking; **mark, never repair**
+- `gate_tier.py`, `store.py`, `metrics.py` — STRICT/STANDARD/LENIENT bars, fail-closed
+  per-chunk retrieval policy, per-class escalation rates
+- `ingest_runner.py`, `goldset.py`, `ontology.py` — batch runner, gold-set evaluator, schema
+- `demo/session.py` — demo review-loop state (largest demo file)
+
 ## Conventions
 
 - Commits: conventional commits with scopes (`fix(demo):`, `docs(survey):`)
