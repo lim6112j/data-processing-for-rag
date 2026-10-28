@@ -1,0 +1,202 @@
+"""Declarative shape contracts: a user-approved shape runs without a reboot.
+
+The old constraint: a shape was a Python class, so its identity was fixed at
+import time -- isinstance chains in the gate, the tier table and the checks all
+referenced classes that cannot exist until a rebuild. A user approving a new
+shape in the UI therefore could not see it take effect in the running process.
+
+The fix keeps every invariant and changes the representation:
+
+* A shape becomes a ``ShapeContract`` -- tier and fields declared as data,
+  approved by the owner, never chosen by a model.
+* The contract lives in a ``ShapeRegistry``; registering it makes it effective
+  for the rest of the process lifetime, no restart.
+* Persistence is explicit: a contract that has passed its gold cases is also
+  serialized (``to_definition``/``from_definition``), so a restart restores the
+  recorded contract instead of losing the capability.
+* Tier assignment stays a lookup -- by contract name now, which is exactly the
+  discipline that prevents silent reclassification. The dangerous direction
+  (LENIENT on a typed record) is still refused structurally.
+
+What must NOT change: the gate still re-derives every value from its span, and
+nothing reaches retrieval without that check. A dynamic contract earns access
+to the same gate, not a weaker one.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from rag_ingest.chunking import Chunker
+from rag_ingest.docmodel import Element, ElementKind, ProvenanceRef, RawDocument
+from rag_ingest.gate_tier import GateTier
+from rag_ingest.ontology import (
+    AbstainReason,
+    FieldAbstention,
+    FieldValue,
+)
+from rag_ingest.shapes import (
+    FieldSpec,
+    ShapeContract,
+    ShapeRegistry,
+)
+
+BBOX = (10.0, 20.0, 400.0, 60.0)
+
+
+def _ref(page: int = 1) -> ProvenanceRef:
+    return ProvenanceRef(page=page, char_start=0, char_end=40, element_id="e")
+
+
+def _value(value: str) -> FieldValue:
+    return FieldValue(value=value, provenance=_ref())
+
+
+def _abstain() -> FieldAbstention:
+    return FieldAbstention(reason=AbstainReason.NOT_PRESENT)
+
+
+TORQUE_CONTRACT = ShapeContract(
+    name="torque_spec",
+    tier=GateTier.STRICT,
+    fields=(
+        FieldSpec(name="thread_size", kind="text", required=True),
+        FieldSpec(name="torque_min", kind="number", required=True, ge=0),
+        FieldSpec(name="torque_max", kind="number", required=True, min_ref="torque_min"),
+        FieldSpec(name="series", kind="enum", values=("Coarse", "Fine"), required=True),
+    ),
+)
+
+
+class TestContractDefinition:
+    def test_contract_holds_its_declaration(self):
+        assert TORQUE_CONTRACT.name == "torque_spec"
+        assert TORQUE_CONTRACT.tier is GateTier.STRICT
+        assert TORQUE_CONTRACT.required_field_names == (
+            "thread_size", "torque_min", "torque_max", "series",
+        )
+
+    def test_contract_serializes_and_restores(self):
+        # The restart story: the approved contract is recorded, a fresh process
+        # restores it, and the restored contract is equal to the original.
+        payload = TORQUE_CONTRACT.to_definition()
+
+        restored = ShapeContract.from_definition(payload)
+
+        assert restored == TORQUE_CONTRACT
+
+    def test_tier_declaration_cannot_be_lenient_for_a_typed_shape(self):
+        # The structural invariant, now at declaration time: a LENIENT tier is
+        # only meaningful for verbatim prose, so a typed contract declaring it
+        # is an invalid contract, not a running hazard.
+        with pytest.raises(ValueError):
+            ShapeContract(
+                name="bad",
+                tier=GateTier.LENIENT,
+                fields=(FieldSpec(name="x", kind="text", required=True),),
+            )
+
+
+class TestRegistry:
+    def test_registration_makes_the_shape_effective_immediately(self):
+        registry = ShapeRegistry()
+
+        assert registry.lookup("torque_spec") is None
+
+        registry.register(TORQUE_CONTRACT)
+
+        assert registry.lookup("torque_spec") is TORQUE_CONTRACT
+
+    def test_registration_is_rejected_for_a_duplicate_name(self):
+        # Two contracts with one name would make tier assignment ambiguous --
+        # exactly the ambiguity the lookup-table discipline exists to prevent.
+        registry = ShapeRegistry()
+        registry.register(TORQUE_CONTRACT)
+
+        with pytest.raises(ValueError):
+            registry.register(TORQUE_CONTRACT)
+
+    def test_built_in_shapes_are_present(self):
+        # The existing ontology shapes are registered as contracts at startup,
+        # so the pipeline's behaviour is identical before and after the pivot.
+        registry = ShapeRegistry.with_builtins()
+
+        assert registry.lookup("invoice").tier is GateTier.STRICT
+        assert registry.lookup("report").tier is GateTier.STANDARD
+        assert registry.lookup("prose").tier is GateTier.LENIENT
+
+
+class TestContractDrivenGate:
+    """The gate honours a dynamically registered contract -- no restart."""
+
+    def _registry(self) -> ShapeRegistry:
+        registry = ShapeRegistry.with_builtins()
+        registry.register(TORQUE_CONTRACT)
+        return registry
+
+    def _ingest_with_contract(self, text: str, field_values: dict[str, str]):
+        from rag_ingest.grounding import GroundingGate
+
+        elements = [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text=text)]
+        raw, located = RawDocument.from_elements("d", elements)
+        chunk = Chunker().chunk("d", located)[0]
+        ref = ProvenanceRef(
+            page=1,
+            char_start=0,
+            char_end=len(raw.pages[0].text),
+            element_id="e1",
+        )
+        # A contract-driven extraction claims exactly the declared fields,
+        # each grounded against the whole page -- same convention as the
+        # gold-set replay extractor.
+        claimed = {
+            name: (
+                FieldValue(value=val, provenance=ref) if val else _abstain()
+            )
+            for name, val in field_values.items()
+        }
+        gate = GroundingGate(raw, shapes=self._registry())
+        return gate, chunk, claimed
+
+    def test_registered_contract_field_set_is_used_by_the_gate(self):
+        gate, _chunk, claimed = self._ingest_with_contract(
+            "1/4-28  50-70  Coarse",
+            {
+                "thread_size": "1/4-28",
+                "torque_min": "50",
+                "torque_max": "70",
+                "series": "Coarse",
+            },
+        )
+
+        result = gate.check_contract("torque_spec", claimed)
+
+        assert result.verified
+
+    def test_contract_required_fields_are_enforced(self):
+        # Drop torque_max: a contract with required fields must produce
+        # INCOMPLETE, not a pass -- same required-evidence rule as the
+        # built-in invoice shape.
+        gate, _chunk, claimed = self._ingest_with_contract(
+            "1/4-28  50-70  Coarse",
+            {
+                "thread_size": "1/4-28",
+                "torque_min": "50",
+                "torque_max": None,
+                "series": "Coarse",
+            },
+        )
+
+        from rag_ingest.grounding import GroundingStatus
+
+        result = gate.check_contract("torque_spec", claimed)
+
+        assert result.status is GroundingStatus.INCOMPLETE
+
+    def test_unregistered_contract_name_is_refused(self):
+        gate, _chunk, claimed = self._ingest_with_contract(
+            "1/4-28  50-70  Coarse", {"thread_size": "1/4-28"}
+        )
+
+        with pytest.raises(KeyError):
+            gate.check_contract("unknown_shape", claimed)

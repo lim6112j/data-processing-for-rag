@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,7 +26,12 @@ from rag_ingest.gate_tier import (
     assert_tier_applies,
     select_gate_tier,
 )
+
+if TYPE_CHECKING:
+    from rag_ingest.shapes import ShapeRegistry
+
 from rag_ingest.ontology import (
+    AbstainReason,
     Extraction,
     FieldAbstention,
     FieldValue,
@@ -133,11 +139,25 @@ def _value_matches_span(value: str, span_text: str) -> bool:
     return False
 
 
-class GroundingGate:
-    """Adjudicates extractions mechanically."""
+def _abstention_for(field_name: str):
+    """The abstention a missing claim stands for: not present, honest, unverified."""
+    return FieldAbstention(reason=AbstainReason.NOT_PRESENT)
 
-    def __init__(self, raw: RawDocument) -> None:
+
+class GroundingGate:
+    """Adjudicates extractions mechanically.
+
+    ``shapes`` carries the runtime shape registry. It is optional: the class
+    path (built-in ontology types) works unchanged, and a contract path is
+    available for shapes the owner approved at runtime -- the thing that used
+    to require a rebuild. Both paths share ``_check_field`` and the
+    required-evidence rule; a dynamic contract earns the same gate, not a
+    weaker one.
+    """
+
+    def __init__(self, raw: RawDocument, shapes: ShapeRegistry | None = None) -> None:
         self._raw = raw
+        self._shapes = shapes
 
     def check(
         self, extraction: Extraction, *, tier: GateTier | None = None
@@ -286,6 +306,82 @@ class GroundingGate:
                 ),
             )
         return None
+
+    def check_contract(
+        self,
+        shape_name: str,
+        claimed: dict[str, FieldValue | FieldAbstention],
+        *,
+        tier: GateTier | None = None,
+    ) -> GroundingResult:
+        """Check a dict of claimed fields against a registered shape contract.
+
+        This is the runtime path for owner-approved shapes. The contract
+        supplies the field order and the required set; the check itself is the
+        same span re-derivation as every other value, so a dynamically
+        approved shape cannot enter retrieval by a route the static shapes
+        do not share.
+        """
+        contract = self._shapes.lookup(shape_name) if self._shapes else None
+        if contract is None:
+            raise KeyError(f"shape contract {shape_name!r} is not registered")
+
+        resolved_tier = tier if tier is not None else contract.tier
+        issues: list[Issue] = []
+        abstained = 0
+        for spec in contract.fields:
+            field = claimed.get(spec.name, _abstention_for(spec.name))
+            if isinstance(field, FieldAbstention):
+                abstained += 1
+                issues.append(
+                    Issue(
+                        field=spec.name,
+                        status=GroundingStatus.ABSTAINED,
+                        message=f"declined to extract: {field.reason}",
+                    )
+                )
+                continue
+            if spec.kind == "enum" and field.value not in spec.values:
+                issues.append(
+                    Issue(
+                        field=spec.name,
+                        status=GroundingStatus.MISMATCH,
+                        message=(
+                            f"claimed value {field.value!r} is not one of "
+                            f"{list(spec.values)}"
+                        ),
+                    )
+                )
+                continue
+            issue = self._check_field(spec.name, field)
+            if issue is not None:
+                issues.append(issue)
+
+        if any(i.status is GroundingStatus.MISMATCH for i in issues):
+            return GroundingResult(status=GroundingStatus.MISMATCH, issues=tuple(issues))
+        if any(i.status is GroundingStatus.UNVERIFIABLE for i in issues):
+            return GroundingResult(
+                status=GroundingStatus.UNVERIFIABLE, issues=tuple(issues)
+            )
+        if abstained == len(contract.fields):
+            return GroundingResult(status=GroundingStatus.ABSTAINED, issues=tuple(issues))
+        # Two evidence bars, both must hold: the tier's minimum-field rule and
+        # the contract's own required set. A required field missing is
+        # INCOMPLETE even when enough optional fields were found -- the owner
+        # declared those fields load-bearing, and the tier floor cannot
+        # override a declaration the gate would otherwise honor.
+        missing_required = [
+            spec.name
+            for spec in contract.fields
+            if spec.required and any(
+                i.field == spec.name and i.status is GroundingStatus.ABSTAINED
+                for i in issues
+            )
+        ]
+        extracted = len(contract.fields) - abstained
+        if missing_required or extracted < MIN_FIELDS_BY_TIER[resolved_tier]:
+            return GroundingResult(status=GroundingStatus.INCOMPLETE, issues=tuple(issues))
+        return GroundingResult(status=GroundingStatus.GROUNDED, issues=tuple(issues))
 
     def _check_field(self, name: str, field: FieldValue) -> Issue | None:
         ref = field.provenance
