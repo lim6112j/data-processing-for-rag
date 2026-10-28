@@ -24,6 +24,7 @@ reason, never a guessed schema.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from rag_ingest.propose import FieldEvidence, Proposal
@@ -49,11 +50,13 @@ PROPOSAL_SCHEMA = {
                         "sample_value": {"type": "string"},
                         "row_index": {"type": "integer"},
                         "required": {"type": "boolean"},
-                        "min_ref": {"type": "string"},
+                        "min_ref": {"type": ["string", "null"]},
                     },
+                    # strict mode: required must list every property. Optional
+                    # meaning is carried by nullable types, not absent keys.
                     "required": [
-                        "name", "kind", "column", "sample_value",
-                        "row_index", "required",
+                        "name", "kind", "column", "values", "sample_value",
+                        "row_index", "required", "min_ref",
                     ],
                     "additionalProperties": False,
                 },
@@ -122,7 +125,9 @@ class LlmProposer:
             ) from exc
         self._client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
-            api_key=self._api_key,
+            # OpenRouter's key lives in OPENROUTER_API_KEY, which the OpenAI
+            # SDK does not read -- resolve it here, like the T2 adjudicator.
+            api_key=self._api_key or os.environ.get("OPENROUTER_API_KEY"),
         )
         return self._client
 
