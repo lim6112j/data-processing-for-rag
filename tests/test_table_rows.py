@@ -199,3 +199,47 @@ class TestRowDiscovery:
         top = report.clusters[0]
         assert top.documents == 2
         assert top.is_candidate
+
+
+class TestCellExpansion:
+    """pdfplumber packs one table cell with several values, newline-separated
+    (the FAA torque table is exactly this). When every cell in a row splits
+    into the same number of lines, the row is N logical rows packed into one
+    physical row -- expansion is mechanical zip, no heuristics."""
+
+    def test_uniform_multiline_cells_expand_into_logical_rows(self):
+        _raw, elements, chunk = _build(
+            (("A", "B"), ("1\n2\n3", "10\n20\n30"))
+        )
+
+        observations = row_observations(chunk, elements)
+
+        # Header (single line) + 3 logical rows from the packed row.
+        assert len(observations) == 4
+        assert observations[1].cells == ("1", "10")
+        assert observations[3].cells == ("3", "30")
+
+    def test_uneven_cells_do_not_expand(self):
+        """Zip of uneven lists would pair wrong values -- refuse to guess."""
+        _raw, elements, chunk = _build(
+            (("A", "B"), ("1\n2", "10"))
+        )
+
+        observations = row_observations(chunk, elements)
+
+        # The row stays packed; uneven cells are the parser's problem to flag.
+        assert len(observations) == 2
+        assert observations[1].cells == ("1\n2", "10")
+
+    def test_blank_single_line_cells_broadcast_as_blank(self):
+        """A blank cell stays blank in every expanded row -- padding with
+        blank invents nothing; padding with a value would."""
+        _raw, elements, chunk = _build(
+            (("A", "B", "C"), ("1\n2", "", "10\n20"))
+        )
+
+        observations = row_observations(chunk, elements)
+
+        assert len(observations) == 3  # header + 2 logical rows
+        assert observations[1].cells == ("1", "", "10")
+        assert observations[2].cells == ("2", "", "20")

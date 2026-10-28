@@ -84,16 +84,41 @@ def _emit_rows(
         line_start = segment_start + sum(
             len(line) + 1 for line in rendered_lines[:index]
         )
-        out.append(
-            RowObservation(
-                doc_id=chunk.doc_id,
-                page=element.page,
-                cells=tuple(cells),
-                row_text=row_text,
-                chunk_start=line_start,
-                chunk_end=line_start + len(row_text),
+        for logical in _expand_cells(cells):
+            out.append(
+                RowObservation(
+                    doc_id=chunk.doc_id,
+                    page=element.page,
+                    cells=logical,
+                    row_text=row_text,
+                    chunk_start=line_start,
+                    chunk_end=line_start + len(row_text),
+                )
             )
-        )
+
+
+def _expand_cells(cells: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    """Unpack pdfplumber's newline-packed cells into logical rows.
+
+    A parser packs several logical rows into one physical row when its grid
+    detection merged them; every cell then carries the same number of
+    newline-separated values, and zip reconstructs them exactly. Uneven
+    counts are NOT expanded: pairing value 1 of column A with value 2 of
+    column B would invent a fact the source does not state.
+    """
+    split = [tuple(c.split("\n")) for c in cells]
+    counts = {len(parts) for parts in split}
+    multi = {n for n in counts if n > 1}
+    if len(multi) != 1:
+        return (cells,)
+    n = multi.pop()
+    # Single-line cells may broadcast only if blank: repeating a non-blank
+    # single value into every logical row would attribute it to rows that
+    # may not have it. Blank stays blank -- no value is invented.
+    if any(len(parts) == 1 and parts[0].strip() != "" for parts in split):
+        return (cells,)
+    padded = [parts if len(parts) == n else ("",) * n for parts in split]
+    return tuple(tuple(parts[i].strip() for parts in padded) for i in range(n))
 
 
 __all__ = ["RowObservation", "row_observations"]
