@@ -77,15 +77,14 @@ parsers*; it never sees grounding failures and never verifies anything.
 
 ## Roadmap (remaining work)
 
-- **Contract persistence**: adopted shape contracts should be written to a
-  config file on adopt and loaded at startup (serialization machinery exists:
-  `ShapeContract.to_definition` / `from_definition`; only the save/load trigger
-  is missing — today adopted shapes die with the demo process)
+- **Contract persistence**: DONE (`shapes_path` on DemoSession — adopt writes,
+  startup loads; corrupt file fails closed to builtins)
+- **Table → row routing**: DONE (`table_rows.py` — pipe-rendered rows,
+  newline-packed cell expansion; FAA TABLE 7-1 routes to 25 rows, one
+  signature, fully proposable)
 - **LLM proposer layer** (`propose.py`): for discovery clusters the
   deterministic grammar cannot parse — must produce the same claim-with-evidence
   shape as the grammar proposer, never guessed schemas
-- **Table → row routing**: FAA torque tables (rows like "7/16-20  450-500") are
-  one shape per row, not one record per table — extraction routing needed
 - **T2 repurposing**: OpenRouter tier could resolve data-quality claims
   (structural disagreements between parsers) — invariant #1 still holds
 - **Real Korean business corpus**: pipeline is proven only on FAA manuals and
