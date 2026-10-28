@@ -27,6 +27,7 @@ from rag_ingest.gate_tier import (
 )
 from rag_ingest.ontology import (
     AbstainReason,
+    DefectCode,
     Extraction,
     FieldAbstention,
     FieldValue,
@@ -87,6 +88,17 @@ class GroundingResult(BaseModel):
         retrievable (plan §5a -- fail closed for the chunk, not the file).
         """
         return self.status is GroundingStatus.GROUNDED
+
+    @property
+    def matched_through_damage(self) -> bool:
+        """The gate read the value only by normalizing OCR confusions.
+
+        A clean pass and a read-through-damage pass are both GROUNDED -- the
+        value is in the source either way -- but they are not the same claim.
+        This flag keeps the distinction inside the result so callers cannot
+        lose it.
+        """
+        return self.needed_normalization
 
 
 def _normalize(text: str, *, strip_currency: bool = False) -> str:
@@ -162,6 +174,19 @@ def _value_matches_span(value: str, span_text: str) -> tuple[bool, bool]:
 
 class GroundingGate:
     """Adjudicates extractions mechanically."""
+
+    @staticmethod
+    def defect_codes_for(result: GroundingResult) -> tuple[DefectCode, ...]:
+        """Defect marks earned by this result, regardless of verdict.
+
+        Matching through OCR substitution is evidence of damage the gate itself
+        observed; it must reach ``ChunkRecord.defects`` like any other mark, so
+        the consumer sees it and the correction decision stays with a human.
+        Marks are earned by *how* a match was made, not by whether it passed.
+        """
+        if result.matched_through_damage:
+            return (DefectCode.SUSPECTED_OCR_DAMAGE,)
+        return ()
 
     def __init__(self, raw: RawDocument) -> None:
         self._raw = raw

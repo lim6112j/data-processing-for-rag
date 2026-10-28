@@ -535,6 +535,16 @@ def _to_record(
     tier: GateTier | None = None,
 ) -> ChunkRecord:
     verified = bool(result is not None and result.verified)
+    # Union of two independent damage observers. The text scanner sees damage
+    # anywhere in the chunk; the gate sees it in exactly the span a value was
+    # read through. Neither alone is complete: "l234.56" escapes the scanner's
+    # pattern, and scanner hits on a *quarantined* chunk never enter retrieval.
+    # Dropping either signal re-opens the silent-correction path.
+    marks = list(scan_defects(chunk.text) if verified else ())
+    if result is not None:
+        for code in GroundingGate.defect_codes_for(result):
+            if code not in marks:
+                marks.append(code)
     return _chunk_to_record(
         chunk,
         verified=verified,
@@ -544,7 +554,7 @@ def _to_record(
         # correction decision stays with a human rather than moving silently to
         # the consumer. Marks describe text that entered retrieval, which is why
         # quarantined records carry none.
-        defects=scan_defects(chunk.text) if verified else (),
+        defects=tuple(marks) if verified else (),
     )
 
 

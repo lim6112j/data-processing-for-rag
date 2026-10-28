@@ -14,6 +14,7 @@ from rag_ingest.docmodel import Element, ElementKind, ProvenanceRef, RawDocument
 from rag_ingest.grounding import GroundingGate, GroundingStatus
 from rag_ingest.ontology import (
     AbstainReason,
+    DefectCode,
     FieldAbstention,
     FieldValue,
     InvoiceHeader,
@@ -83,6 +84,7 @@ class TestCentralClaim:
         assert gate.check(right).status is GroundingStatus.GROUNDED
         assert gate.check(wrong).status is GroundingStatus.MISMATCH
 
+class TestNormalizationSurfacing:
     def test_ocr_confusion_match_is_grounded_but_flagged(self):
         # Raw text carries the OCR damage; the value reads through it.
         raw, ref = _doc("Total l,234.56")
@@ -98,6 +100,46 @@ class TestCentralClaim:
 
         assert result.status is GroundingStatus.GROUNDED
         assert result.needed_normalization is True
+
+
+class TestNormalizationBecomesAMark:
+    """A gate that only matched through OCR substitution knows the text is
+
+    damaged. That signal must not stop at the gate: marks describe text that
+    entered retrieval, and this text entered by reading *through* damage.
+    """
+
+    def test_gate_offers_ocr_damage_mark_for_normalization_matches(self):
+        raw, ref = _doc("Total l,234.56")
+
+        extraction = InvoiceHeader(
+            invoice_number=_value("l,234", ref),
+            issue_date=_abstain(),
+            total_amount=_value("1234.56", ref),
+            currency=_abstain(),
+        )
+
+        result = GroundingGate(raw).check(extraction)
+
+        assert GroundingGate.defect_codes_for(result) == (
+            DefectCode.SUSPECTED_OCR_DAMAGE,
+        )
+
+    def test_clean_grounding_offers_no_mark(self):
+        raw, ref = _doc("Invoice INV-9 total 1,234.56")
+
+        extraction = InvoiceHeader(
+            invoice_number=_value("INV-9", ref),
+            issue_date=_abstain(),
+            total_amount=_value("1234.56", ref),
+            currency=_abstain(),
+        )
+
+        result = GroundingGate(raw).check(extraction)
+
+        assert result.status is GroundingStatus.GROUNDED
+        assert result.needed_normalization is False
+        assert GroundingGate.defect_codes_for(result) == ()
 
 
 class TestProvenanceIntegrity:

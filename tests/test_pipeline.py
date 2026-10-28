@@ -12,6 +12,7 @@ from rag_ingest.docmodel import Element, ElementKind, ProvenanceRef, RawDocument
 from rag_ingest.escalation import EscalationReason, ReviewQueue
 from rag_ingest.ontology import (
     AbstainReason,
+    DefectCode,
     FieldAbstention,
     FieldValue,
     InvoiceHeader,
@@ -38,6 +39,13 @@ class StubExtractor:
             return None
         ref = self._refs[key]
         if template == "invoice_ok":
+            return InvoiceHeader(
+                invoice_number=FieldValue(value="INV-9", provenance=ref),
+                issue_date=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
+                total_amount=FieldValue(value="1234.56", provenance=ref),
+                currency=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
+            )
+        if template == "invoice_damaged_but_readable":
             return InvoiceHeader(
                 invoice_number=FieldValue(value="INV-9", provenance=ref),
                 issue_date=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
@@ -94,6 +102,90 @@ class TestHappyPath:
         assert outcome.verified_chunks[0].ontology_version
         # The unextractable second section is quarantined, not dropped.
         assert all(not item for item in [c.verified for c in outcome.quarantined_chunks])
+
+
+class TestNormalizationBecomesAMark:
+    """The gate read through OCR damage; that observation must survive into
+
+    the record. An unmarked read-through-damage value is exactly the
+    silent-correction path the mark policy exists to close.
+    """
+
+    def test_gate_normalization_match_is_marked_on_the_record(self):
+        elements = [
+            heading("Invoices", level=1, element_id="h-inv"),
+            # Damage the gate will normalize through: l for 1 in the amount.
+            paragraph("Invoice INV-9 total l,234.56 KRW", element_id="p-inv"),
+        ]
+        raw, doc_elements = RawDocument.from_elements("d1", elements)
+        ref = ProvenanceRef(
+            page=1,
+            char_start=raw.pages[0].text.index("Invoice INV-9"),
+            char_end=(
+                raw.pages[0].text.index("Invoice INV-9")
+                + len("Invoice INV-9 total l,234.56 KRW")
+            ),
+        )
+        extractor = StubExtractor(
+            {"Invoices": "invoice_damaged_but_readable"}, {"Invoices": ref}
+        )
+
+        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
+            raw, doc_elements, owner_id="owner-1"
+        )
+
+        assert len(outcome.verified_chunks) == 1
+        record = outcome.verified_chunks[0]
+        assert record.verified is True
+        assert record.defects == (DefectCode.SUSPECTED_OCR_DAMAGE,)
+
+    def test_damage_only_the_gate_saw_is_still_marked(self):
+        # "l234.56" escapes the text scanner's pattern (no thousands
+        # separator), so only the gate's normalization match knows the text is
+        # damaged. That observation must not be discarded at the gate.
+        elements = [
+            heading("Invoices", level=1, element_id="h-inv"),
+            paragraph("Invoice INV-9 total l234.56 KRW", element_id="p-inv"),
+        ]
+        raw, doc_elements = RawDocument.from_elements("d1", elements)
+        ref = ProvenanceRef(
+            page=1,
+            char_start=raw.pages[0].text.index("Invoice INV-9"),
+            char_end=(
+                raw.pages[0].text.index("Invoice INV-9")
+                + len("Invoice INV-9 total l234.56 KRW")
+            ),
+        )
+        extractor = StubExtractor(
+            {"Invoices": "invoice_damaged_but_readable"}, {"Invoices": ref}
+        )
+
+        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
+            raw, doc_elements, owner_id="owner-1"
+        )
+
+        assert len(outcome.verified_chunks) == 1
+        assert outcome.verified_chunks[0].defects == (
+            DefectCode.SUSPECTED_OCR_DAMAGE,
+        )
+
+    def test_clean_grounding_carries_no_gate_mark(self):
+        raw, elements = _build_doc()
+        ref = ProvenanceRef(
+            page=1,
+            char_start=raw.pages[0].text.index("Invoice INV-9"),
+            char_end=(
+                raw.pages[0].text.index("Invoice INV-9")
+                + len("Invoice INV-9 total 1234.56 KRW")
+            ),
+        )
+        extractor = StubExtractor({"Invoices": "invoice_ok"}, {"Invoices": ref})
+
+        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
+            raw, elements, owner_id="owner-1"
+        )
+
+        assert outcome.verified_chunks[0].defects == ()
 
 
 class TestUngroundedValue:
