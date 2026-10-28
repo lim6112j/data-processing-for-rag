@@ -79,7 +79,7 @@ def test_nan_scores_become_none(parsed):
     for element in elements:
         for score in (
             element.scores.layout_score,
-            element.scores.ocr_score,
+            element.scores.parse_score,
             element.scores.parse_score,
         ):
             assert score is None or score == score

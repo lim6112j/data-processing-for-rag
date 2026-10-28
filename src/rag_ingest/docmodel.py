@@ -34,9 +34,9 @@ def nfkc(text: str) -> str:
 
 
 class ElementScores(BaseModel):
-    """Per-element confidence reported by the layout/OCR pipeline.
+    """Per-element confidence reported by the parsing pipeline.
 
-    Mirrors Docling's confidence report: ``layout_score``, ``ocr_score`` and
+    Mirrors the parser's confidence report: ``layout_score`` and
     ``parse_score``. ``table_score`` is deliberately *absent* -- upstream
     documents it as not yet implemented, so table quality must be derived from
     cell coverage and grounding re-derivation instead of trusting a score that
@@ -46,16 +46,11 @@ class ElementScores(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     layout_score: float | None = Field(default=None, ge=0.0, le=1.0)
-    ocr_score: float | None = Field(default=None, ge=0.0, le=1.0)
     parse_score: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @property
     def is_empty(self) -> bool:
-        return (
-            self.layout_score is None
-            and self.ocr_score is None
-            and self.parse_score is None
-        )
+        return self.layout_score is None and self.parse_score is None
 
 
 class ElementKind(StrEnum):

@@ -192,7 +192,7 @@ class OpenRouterAdjudicator:
         if image_png is None:
             return AdjudicationDecision(
                 kind="abstain",
-                reason=AbstainReason.ILLEGIBLE,
+                reason=AbstainReason.AMBIGUOUS,
                 rationale="Page image unavailable; T2 cannot judge from text alone.",
             )
 

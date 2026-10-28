@@ -26,7 +26,6 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from rag_ingest.chunking import Chunk, ChunkKind
-from rag_ingest.defects import DAMAGED_AMOUNT
 from rag_ingest.ontology import (
     AbstainReason,
     Extraction,
@@ -61,22 +60,13 @@ _DATE = re.compile(r"\b(?P<date>\d{4}-\d{2}-\d{2})\b")
 #: currency-marked amount. Deliberately narrow -- collecting every
 #: currency-marked number would reconcile the total against itself, since the
 #: total itself is a currency-marked number. Only a row label makes a number
-#: a line item, and the damaged-amount alternative keeps a damaged ROW visible
-#: as ILLEGIBLE rather than disappearing into a clean-looking record.
+#: a line item.
 _LINE_ROW = re.compile(
     r"(?im)^\s*(?:line|item|품목)\s*\d+\s*[:\-]\s*.*?"
     r"(?P<currency>[₩$€£¥])?\s*"
     r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d{2})"
     r"\s?(?P<currency2>[₩$€£¥])?",
 )
-
-#: Something that looks like it *wants* to be an amount but is damaged -- e.g.
-#: OCR read a lowercase L for the leading 1 ("l,234.56"). Detecting this is what
-#: separates "the field is absent" from "the field is there and unreadable":
-#: reporting the latter as NOT_PRESENT hides a real extraction failure inside a
-#: legitimate-looking abstention. Owned by ``defects`` and shared, because the
-#: same pattern drives defect marking on admitted prose.
-_DAMAGED_AMOUNT = DAMAGED_AMOUNT
 
 #: Text that looks like a document header rather than an invoice.
 _INVOICE_HINT = re.compile(r"(?i)\b(invoice|tax invoice|receipt|청구서|계산서)\b")
@@ -163,9 +153,7 @@ class TemplateExtractor(BaseModel):
 
         A row whose amount cannot be anchored to the page buffer is worthless
         for reconciliation, so it is skipped entirely rather than carried with
-        a fabricated span -- same rule as every other field here. Damaged but
-        anchored amounts become ILLEGIBLE abstentions so the gap stays
-        visible.
+        a fabricated span -- same rule as every other field here.
         """
         items: list[LineItem] = []
         for match in _LINE_ROW.finditer(chunk.text):
@@ -177,15 +165,8 @@ class TemplateExtractor(BaseModel):
 
     def _line_amount(self, match, chunk: Chunk):
         num = match.group("num")
-        # The amount portion must not begin mid-number: "l,234.56" leaves
-        # "234.56" for the regex, which would read a damaged row as a clean
-        # 234.56 and poison reconciliation. Two characters of look-behind is
-        # the minimum the damage pattern needs ([lIO|] + separator); a
-        # damaged-amount hit in that window means the row exists but its
-        # amount is unreadable.
-        look_behind = match.group(0)[max(0, match.start("num") - match.start(0) - 2) :]
-        if num is None or _DAMAGED_AMOUNT.search(look_behind):
-            return FieldAbstention(reason=AbstainReason.ILLEGIBLE)
+        if num is None:
+            return FieldAbstention(reason=AbstainReason.NOT_PRESENT)
         span = chunk.span_for(match.start("num"), match.end("num"))
         if span is None:
             return None
@@ -222,10 +203,6 @@ class TemplateExtractor(BaseModel):
                 continue
             return FieldValue(value=number, provenance=span)
 
-        if _DAMAGED_AMOUNT.search(chunk.text):
-            # An amount is present but unreadable. Saying NOT_PRESENT here would
-            # be a lie that makes an OCR failure look like a clean document.
-            return FieldAbstention(reason=AbstainReason.ILLEGIBLE)
         return FieldAbstention(reason=AbstainReason.NOT_PRESENT)
 
     def _currency(self, chunk: Chunk):

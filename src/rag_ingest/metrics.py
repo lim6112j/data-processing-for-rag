@@ -37,9 +37,9 @@ class ClassReport(BaseModel):
 
         A majority of schema-shaped failures means the type definition is wrong
         for this class, not that the extractor was unlucky. Grounding failures
-        are excluded: those are a parser/OCR problem, not a schema problem.
+        are excluded: those are a parser problem, not a schema problem.
         ``CONSISTENCY_FAILED`` is excluded with the same reasoning: a grounded
-        value that fails a plausibility check is OCR-damaged or misparsed
+        value that fails a plausibility check is misparsed or mis-keyed
         digits, not evidence the type definition is wrong.
         """
         if self.escalated == 0:

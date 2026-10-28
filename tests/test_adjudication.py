@@ -86,7 +86,7 @@ class TestDecisionCoherence:
 
     def test_abstain_requires_reason(self):
         assert AdjudicationDecision(
-            kind="abstain", reason=AbstainReason.ILLEGIBLE
+            kind="abstain", reason=AbstainReason.AMBIGUOUS
         ).is_coherent(2)
         assert not AdjudicationDecision(kind="abstain").is_coherent(2)
 

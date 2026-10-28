@@ -32,7 +32,7 @@ class ScriptedAdjudicator(BaseModel):
         if self.always_abstain:
             return AdjudicationDecision(
                 kind="abstain",
-                reason=AbstainReason.ILLEGIBLE,
+                reason=AbstainReason.AMBIGUOUS,
                 rationale="scripted abstention",
             )
 

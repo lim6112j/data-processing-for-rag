@@ -57,6 +57,6 @@ def located():
 
 
 def scores(
-    layout: float | None = None, ocr: float | None = None, parse: float | None = None
+    layout: float | None = None, parse: float | None = None
 ) -> ElementScores:
-    return ElementScores(layout_score=layout, ocr_score=ocr, parse_score=parse)
+    return ElementScores(layout_score=layout, parse_score=parse)

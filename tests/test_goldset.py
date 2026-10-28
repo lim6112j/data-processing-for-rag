@@ -61,9 +61,9 @@ def test_clean_invoice_verifies(goldset):
     assert len(outcome.verified_chunks) == 1
 
 
-def test_ocr_damage_is_never_retrieved(goldset):
+def test_invented_value_is_never_retrieved(goldset):
     # The headline case: the invented number must not reach retrieval.
-    case = next(c for c in goldset.cases if c.id == "ocr-lowercase-l-total")
+    case = next(c for c in goldset.cases if c.id == "invented-total-is-ungrounded")
     result, outcome = _run(case)
 
     assert result.passed
@@ -72,7 +72,7 @@ def test_ocr_damage_is_never_retrieved(goldset):
 
 
 def test_unreadable_page_is_never_extracted(goldset):
-    case = next(c for c in goldset.cases if c.id == "scanned-no-text-layer")
+    case = next(c for c in goldset.cases if c.id == "broken-text-layer")
     result, outcome = _run(case)
 
     assert result.passed
@@ -113,7 +113,7 @@ def test_mixed_document_quarantines_only_the_bad_chunk(goldset):
 
 
 def test_case_result_records_reasons(goldset):
-    case = next(c for c in goldset.cases if c.id == "ocr-lowercase-l-total")
+    case = next(c for c in goldset.cases if c.id == "invented-total-is-ungrounded")
     result, _ = _run(case)
 
     assert result.passed
@@ -123,9 +123,8 @@ def test_case_result_records_reasons(goldset):
 class TestReviewQuestionWording:
     """The question must say what to do, not just what is wrong.
 
-    A reviewer reading "missing: issue_date, total_amount, currency" cannot tell
-    a damaged scan from absent information -- so they cannot know whether to
-    rescan or to supply a value.
+    A reviewer reading "missing: issue_date, total_amount, currency" still
+    knows exactly which fields to supply -- the question names them.
     """
 
     def _item(self, text: str):
@@ -147,14 +146,6 @@ class TestReviewQuestionWording:
         for review_item in outcome.review_items:
             queue.enqueue(review_item)
         return queue.open_items()[0]
-
-    def test_damaged_value_is_described_as_unreadable_not_absent(self):
-        item = self._item("Invoice INV-3003 total l,234.56 USD")
-
-        assert "could not read" in item.question
-        assert "total amount" in item.question
-        # The reviewer must not be told to supply a value that is right there.
-        assert "did not find total amount" not in item.question
 
     def test_absent_fields_are_separated_from_damaged_ones(self):
         item = self._item("Invoice INV-3003 total l,234.56 USD")

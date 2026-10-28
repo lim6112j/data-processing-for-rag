@@ -58,7 +58,6 @@ class TierView(BaseModel):
     tier: str
     reasons: tuple[str, ...] = Field(default_factory=tuple)
     layout_score: float | None = None
-    ocr_score: float | None = None
     parse_score: float | None = None
 
 
@@ -203,7 +202,6 @@ class DemoSession:
                 update={
                     "scores": ElementScores(
                         layout_score=0.2,
-                        ocr_score=element.scores.ocr_score,
                         parse_score=element.scores.parse_score,
                     )
                 }
@@ -361,7 +359,6 @@ class DemoSession:
                 tier=decision.tier.value,
                 reasons=decision.reasons,
                 layout_score=decision.scores.layout_score,
-                ocr_score=decision.scores.ocr_score,
                 parse_score=decision.scores.parse_score,
             )
             for element_id, decision in outcome.tier_decisions

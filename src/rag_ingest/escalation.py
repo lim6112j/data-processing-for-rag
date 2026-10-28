@@ -28,7 +28,7 @@ class EscalationReason(StrEnum):
     SCHEMA_MISMATCH = "schema_mismatch"
     LOW_CONFIDENCE = "low_confidence"
     #: Values were grounded but too few were found to describe the chunk -- most
-    #: often OCR damage hiding a field, or a template that no longer matches.
+    #: often a field the extractor declined, or a template that no longer matches.
     INCOMPLETE_EXTRACTION = "incomplete_extraction"
     CONFLICT_WITH_EXISTING = "conflict_with_existing"
     UNCLASSIFIED = "unclassified"
@@ -36,7 +36,7 @@ class EscalationReason(StrEnum):
     UNGROUNDED = "ungrounded"
     #: A deterministic consistency check disagreed with a grounded value
     #: (``checks.py``). Not schema-shaped: an impossible date is almost always
-    #: OCR-damaged or misparsed digits, a parser problem like UNGROUNDED, not
+    #: misparsed or mis-keyed digits, a parser problem like UNGROUNDED, not
     #: a signal that the ontology type is wrong. Deliberately excluded from
     #: the ``suspect_ontology`` classification in ``metrics``.
     CONSISTENCY_FAILED = "consistency_failed"

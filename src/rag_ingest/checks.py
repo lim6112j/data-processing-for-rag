@@ -2,7 +2,7 @@
 
 survey.md conclusion 1, ranked first among missing pieces: the pipeline verifies
 "the value is in the source" but never "the values are consistent". Both an
-implausible date (``2026-13-45``) and a self-consistent OCR error pass grounding
+implausible date (``2026-13-45``) and a wrong-but-real number pass grounding
 by construction -- the string IS verbatim in the span. These checks are cheap,
 model-free, and catch a class of error the grounding gate cannot see.
 
@@ -38,7 +38,7 @@ from rag_ingest.ontology import (
 )
 
 #: Newest issue date the ontology's seed corpus could legitimately carry.
-#: Exists so an OCR-mangled year (e.g. 92026-01-01) fails as implausible
+#: Exists so a mangled year (e.g. 92026-01-01) fails as implausible
 #: rather than passing as "far future". Not a tunable knob to stretch when the
 #: queue gets busy -- it is a plausibility horizon, and a document legitimately
 #: dated beyond it becomes a review question, which is the correct outcome.
@@ -130,9 +130,9 @@ def _check_date_plausibility(
         return None
     if _parse_iso_date(value.value) is None:
         # ISO shape, impossible calendar values (2026-13-45, 2026-02-30,
-        # 1900-02-29). This is precisely the OCR-damage signature: the digits
-        # are verbatim in the source, so grounding passes; only the calendar
-        # can see that they cannot mean a day.
+        # 1900-02-29). This is precisely the failure grounding cannot see: the
+        # digits are verbatim in the source, so the gate passes them; only the
+        # calendar can see that they cannot mean a day.
         return CheckFailure(
             field=field,
             check_name="date_plausibility",
@@ -170,9 +170,9 @@ def _parse_amount(raw: str) -> Decimal | None:
 
 
 #: Tolerance for reconciliation, in units of the smallest digit present.
-#: One cent/jeon: OCR can drop a trailing zero, but a mismatch larger than a
-#: rounding unit is a finding, not formatting. Decimal avoids the float drift
-#: that would turn 0.1+0.2 into a false alarm.
+#: One cent/jeon: a real total can differ from its lines by rounding, but a
+#: mismatch larger than a rounding unit is a finding, not formatting. Decimal
+#: avoids the float drift that would turn 0.1+0.2 into a false alarm.
 RECONCILIATION_TOLERANCE = Decimal("0.01")
 
 

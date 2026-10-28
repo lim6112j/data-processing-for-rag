@@ -24,7 +24,6 @@ from rag_ingest.adjudication import (
 from rag_ingest.candidates import CandidateProducer, NullProducer, describe_disagreement
 from rag_ingest.checks import CheckFailure, check_extraction
 from rag_ingest.chunking import Chunk, Chunker
-from rag_ingest.defects import scan_defects
 from rag_ingest.docmodel import Element, ProvenanceRef, RawDocument
 from rag_ingest.escalation import (
     Correction,
@@ -39,7 +38,6 @@ from rag_ingest.ontology import (
     PIPELINE_VERSION,
     AbstainReason,
     ChunkRecord,
-    DefectCode,
     Extraction,
     GateTier,
 )
@@ -119,12 +117,6 @@ class IngestPipeline:
             tier_decisions.append((element.element_id, decision))
             if decision.tier is Tier.ESCALATE:
                 pre_escalations.append(element)
-            elif decision.tier is Tier.RETRY_OCR:
-                # Plan section 3: never attempt semantic extraction on garbage
-                # text. The text layer failed, so chunking it would put
-                # unreadable characters into the store under a confident
-                # heading. Queue it for re-scan instead.
-                pre_escalations.append(element)
             else:
                 # EXTRACT and STRUCTURE_UNKNOWN both carry usable text;
                 # STRUCTURE_UNKNOWN is chunked as flat text only.
@@ -193,20 +185,10 @@ class IngestPipeline:
             review_items.append(item)
 
         for element in pre_escalations:
-            retry_ocr = any(
-                element.element_id == element_id and decision.tier is Tier.RETRY_OCR
-                for element_id, decision in tier_decisions
+            question = (
+                f"Page {element.page} could not be parsed as text. "
+                "Is there another text source for this content?"
             )
-            if retry_ocr:
-                question = (
-                    f"Page {element.page} was read at low OCR confidence. Is a higher-resolution "
-                    "scan or a text version of this passage available?"
-                )
-            else:
-                question = (
-                    f"Page {element.page} could not be read as text. "
-                    "Is a clearer scan available, or can the content be supplied as text?"
-                )
             review_items.append(
                 ReviewItem(
                     item_id=f"{raw.doc_id}:{element.element_id}:triage",
@@ -416,39 +398,30 @@ class IngestPipeline:
 def _incomplete_question(
     chunk: Chunk, extraction: Extraction | None, result: GroundingResult
 ) -> str:
-    """State what was read, what was unreadable, and what was absent.
+    """State what was read and what was absent, field by field.
 
-    "Not legible" and "not present" call for different actions: one is a
-    re-scan, the other is new information. Collapsing them into a single
-    "missing" list told the reviewer nothing about what to do.
+    A vague "missing" list told the reviewer nothing about what to do; the
+    question names the found fields so the reviewer knows what was already
+    right, and asks for values only where extraction declined.
     """
     issue_by_field = {
         issue.field: issue
         for issue in result.issues
         if issue.status is GroundingStatus.ABSTAINED
     }
-    illegible = [name for name in issue_by_field if "illegible" in issue_by_field[name].message]
-    absent = [name for name in issue_by_field if name not in illegible]
+    absent = list(issue_by_field)
     found = [name for name in _field_names(extraction) if name not in issue_by_field]
 
     parts = []
     where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
     if found:
         parts.append(f"read {_join(found)}")
-    if illegible:
-        parts.append(f"could not read {_join(illegible)} (damaged or illegible)")
     if absent:
         parts.append(f"did not find {_join(absent)}")
 
-    question = f"Partially read the record{where}: " + "; ".join(parts) + "."
-    if illegible:
-        question += (
-            " For the damaged fields, is a clearer scan available,"
-            " and what are the correct values?"
-        )
-    if absent:
-        question += " For the missing fields, what should they be?"
-    return question
+    return f"Partially read the record{where}: " + "; ".join(parts) + "." + (
+        " For the missing fields, what should they be?" if absent else ""
+    )
 
 
 def _unclassified_question(chunk: Chunk, extraction: Extraction | None) -> str:
@@ -492,7 +465,7 @@ def _field_names(extraction: Extraction | None) -> list[str]:
     return [
         name
         for name in type(extraction).model_fields
-        if name not in ("doc_type", "kind")
+        if name not in ("doc_type", "kind", "line_items")
     ]
 
 
@@ -581,27 +554,11 @@ def _to_record(
     result: GroundingResult | None,
     tier: GateTier | None = None,
 ) -> ChunkRecord:
-    verified = bool(result is not None and result.verified)
-    # Union of two independent damage observers. The text scanner sees damage
-    # anywhere in the chunk; the gate sees it in exactly the span a value was
-    # read through. Neither alone is complete: "l234.56" escapes the scanner's
-    # pattern, and scanner hits on a *quarantined* chunk never enter retrieval.
-    # Dropping either signal re-opens the silent-correction path.
-    marks = list(scan_defects(chunk.text) if verified else ())
-    if result is not None:
-        for code in GroundingGate.defect_codes_for(result):
-            if code not in marks:
-                marks.append(code)
     return _chunk_to_record(
         chunk,
-        verified=verified,
+        verified=bool(result is not None and result.verified),
         extraction=extraction,
         tier=tier,
-        # Marked, never repaired: an admitted defect stays visible, so the
-        # correction decision stays with a human rather than moving silently to
-        # the consumer. Marks describe text that entered retrieval, which is why
-        # quarantined records carry none.
-        defects=tuple(marks) if verified else (),
     )
 
 
@@ -610,7 +567,6 @@ def _chunk_to_record(
     verified: bool,
     extraction: Extraction | None,
     tier: GateTier | None = None,
-    defects: tuple[DefectCode, ...] = (),
 ) -> ChunkRecord:
     return ChunkRecord(
         chunk_id=chunk.chunk_id,
@@ -622,7 +578,6 @@ def _chunk_to_record(
         pipeline_version=PIPELINE_VERSION,
         extraction=extraction,
         gate_tier=tier,
-        defects=defects,
     )
 
 

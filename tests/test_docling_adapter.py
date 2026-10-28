@@ -181,11 +181,11 @@ class TestScores:
                 _Item("#/p2", "text", "b", [_Prov(1, None)]),
             ]
         )
-        scores = {1: ElementScores(layout_score=0.9, ocr_score=0.4)}
+        scores = {1: ElementScores(layout_score=0.9, parse_score=0.4)}
 
         elements = document_to_elements(doc, scores_by_page=scores)
 
-        assert all(e.scores.ocr_score == 0.4 for e in elements)
+        assert all(e.scores.parse_score == 0.4 for e in elements)
         assert all(e.scores.layout_score == 0.9 for e in elements)
 
     def test_missing_scores_yield_empty_scores(self):
@@ -197,19 +197,18 @@ class TestScores:
         # table_score is unimplemented and comes back as nan; passing it through
         # would make every threshold comparison false.
         confidence = SimpleNamespace(
-            pages={1: SimpleNamespace(layout_score=0.8, ocr_score=float("nan"), parse_score=0.9)}
+            pages={1: SimpleNamespace(layout_score=0.8, parse_score=float("nan"))}
         )
         doc = _doc_with([_Item("#/p", "text", "x", [_Prov(1, None)])])
 
         scores = page_scores(doc, confidence)
 
-        assert scores[1].ocr_score is None
+        assert scores[1].parse_score is None
         assert scores[1].layout_score == 0.8
-        assert scores[1].parse_score == 0.9
 
     def test_page_scores_are_keyed_numerically(self):
         confidence = SimpleNamespace(
-            pages={1: SimpleNamespace(layout_score=0.5, ocr_score=None, parse_score=None)}
+            pages={1: SimpleNamespace(layout_score=0.5, parse_score=None)}
         )
 
         assert 1 in page_scores(_doc_with([]), confidence)

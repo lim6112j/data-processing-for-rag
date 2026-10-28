@@ -58,7 +58,9 @@ parsers*; it never sees grounding failures and never verifies anything.
 
 - `docmodel.py` — dependency-free element tree + provenance model (adapter boundary)
 - `extractors.py`, `candidates.py` — T0 regex extractors; dual-parse disagreement production for T2
-- `defects.py` — mechanical OCR-damage marking; **mark, never repair**
+- `checks.py` — deterministic semantic checks after the gate: date plausibility,
+  arithmetic reconciliation. The corpus is **born-digital documents only** —
+  no OCR machinery, no character-substitution matching
 - `gate_tier.py`, `store.py`, `metrics.py` — STRICT/STANDARD/LENIENT bars, fail-closed
   per-chunk retrieval policy, per-class escalation rates
 - `ingest_runner.py`, `goldset.py`, `ontology.py` — batch runner, gold-set evaluator, schema

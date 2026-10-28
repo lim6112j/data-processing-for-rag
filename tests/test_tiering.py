@@ -1,4 +1,8 @@
-"""Plan section 3, failure class A: gate on OCR/layout scores before semantics."""
+"""Plan section 3, failure class A: gate on parser scores before semantics.
+
+Born-digital corpus: no OCR tier exists. A bad parse score escalates
+directly -- there is no re-scan path to offer, only a human question.
+"""
 
 from __future__ import annotations
 
@@ -18,47 +22,39 @@ def _element(text: str = "readable text", **score_kwargs) -> Element:
 
 
 def test_good_scores_extract():
-    assert select_tier(_element(ocr=0.95, layout=0.9, parse=0.9)).tier is Tier.EXTRACT
-
-
-def test_poor_ocr_triggers_retry_rather_than_semantic_extraction():
-    decision = select_tier(_element(ocr=0.3, layout=0.95, parse=0.95))
-
-    assert decision.tier is Tier.RETRY_OCR
-    assert not decision.is_extractable
-
-
-def test_poor_parse_score_triggers_retry():
-    assert select_tier(_element(parse=0.2, ocr=0.95)).tier is Tier.RETRY_OCR
-
-
-def test_ocr_is_adjudicated_before_layout():
-    # Both bad: an unreadable glyph cannot be rescued by good structure, but a
-    # structurally broken page can be re-read. OCR quality wins the decision.
-    decision = select_tier(_element(ocr=0.1, layout=0.1))
-
-    assert decision.tier is Tier.RETRY_OCR
-
-
-def test_poor_layout_marks_structure_unknown_but_still_extractable():
-    decision = select_tier(_element(ocr=0.9, layout=0.3))
-
-    assert decision.tier is Tier.STRUCTURE_UNKNOWN
-    assert decision.is_extractable
-
-
-def test_empty_rendered_element_escalates():
-    assert select_tier(_element(text="   ", ocr=0.9, layout=0.9)).tier is Tier.ESCALATE
-
-
-def test_element_with_no_scores_is_treated_as_extractable():
-    # A parser that reports nothing is not evidence of failure.
-    decision = select_tier(_element())
-
+    decision = select_tier(_element(layout=0.9, parse=0.9))
     assert decision.tier is Tier.EXTRACT
-    assert "no_scores_reported" in decision.reasons
 
 
-def test_thresholds_boundary_is_inclusive():
-    assert select_tier(_element(ocr=0.5)).tier is Tier.EXTRACT
-    assert select_tier(_element(layout=0.6)).tier is Tier.EXTRACT
+def test_bad_parse_score_escalates():
+    # No re-scan path in a born-digital corpus: the text layer is either
+    # there or it is not. Escalate rather than extract on damaged text.
+    decision = select_tier(_element(layout=0.95, parse=0.2))
+    assert decision.tier is Tier.ESCALATE
+
+
+def test_bad_layout_gives_structure_unknown_not_escalation():
+    # Structure suspicion is a chunking concern, not a reading failure.
+    decision = select_tier(_element(layout=0.3, parse=0.9))
+    assert decision.tier is Tier.STRUCTURE_UNKNOWN
+
+
+def test_parse_score_is_adjudicated_before_layout():
+    # Order matters: broken text makes structure questions meaningless.
+    decision = select_tier(_element(layout=0.1, parse=0.1))
+    assert decision.tier is Tier.ESCALATE
+    assert any("parse_score" in r for r in decision.reasons)
+
+
+def test_empty_text_escalates_even_with_good_scores():
+    decision = select_tier(_element(text="   ", layout=0.9, parse=0.9))
+    assert decision.tier is Tier.ESCALATE
+
+
+def test_no_scores_at_all_is_treated_as_extractable():
+    assert select_tier(_element()).tier is Tier.EXTRACT
+
+
+def test_partial_scores_do_not_block():
+    # A parser that reports only layout is not evidence of failure.
+    assert select_tier(_element(layout=0.9)).tier is Tier.EXTRACT

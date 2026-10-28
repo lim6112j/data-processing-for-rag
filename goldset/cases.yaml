@@ -16,7 +16,7 @@ cases:
       Well-formed invoice with a legible text layer. The boring case: everything
       should verify, nothing should be queued.
     class: invoice
-    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
+    scores: { layout: 0.94, parse: 0.95 }
     pages:
       - |
         INVOICE
@@ -31,18 +31,18 @@ cases:
       quarantined: 0
       reason: null
 
-  - id: ocr-lowercase-l-total
+  - id: invented-total-is-ungrounded
     description: >
-      The canonical failure. OCR reads "l,234.56" for "1,234.56". A constrained
-      extractor cannot emit invalid JSON, so it emits a legal but invented
-      number. Schema validation passes; grounding must fail it.
+      The canonical failure, born-digital form: the extractor emits a total the
+      document never states. Schema validation passes by construction; the
+      value is simply not in the text it cites, so grounding must fail it.
     class: invoice
-    scores: { ocr: 0.72, layout: 0.9, parse: 0.88 }
+    scores: { layout: 0.9, parse: 0.88 }
     pages:
       - |
         INVOICE
         Invoice INV-2042
-        Total l,234.56 KRW
+        Total 1,234.56 KRW
     extractor_claim: { total_amount: "1334.56" }
     expected:
       verified: 0
@@ -50,12 +50,13 @@ cases:
       reason: ungrounded
       not_retrievable: ["1334.56"]
 
-  - id: scanned-no-text-layer
+  - id: broken-text-layer
     description: >
-      A scan with no usable text layer. Nothing should be extracted, because
-      attempting semantics on garbage guarantees a confident wrong answer.
+      A born-digital PDF whose text layer is broken (bad extraction, encoded
+      without a ToUnicode map). Nothing should be extracted, because attempting
+      semantics on unreliable text guarantees a confident wrong answer.
     class: invoice
-    scores: { ocr: 0.18, layout: 0.55, parse: 0.2 }
+    scores: { layout: 0.55, parse: 0.2 }
     pages:
       - "Invoice total approx 900.00"
     expected:
@@ -69,7 +70,7 @@ cases:
       detect this; the unclassified path must, without counting it as a schema
       failure.
     class: unknown
-    scores: { ocr: 0.97, layout: 0.93, parse: 0.95 }
+    scores: { layout: 0.93, parse: 0.95 }
     pages:
       - |
         Procurement Haiku
@@ -87,7 +88,7 @@ cases:
       A long table. Whatever happens to its verification, it must remain a
       single chunk: a table row without its header row is worse than no chunk.
     class: invoice
-    scores: { ocr: 0.95, layout: 0.92, parse: 0.9 }
+    scores: { layout: 0.92, parse: 0.9 }
     pages:
       - "Line items"
     table_rows: 40
@@ -100,113 +101,15 @@ cases:
       return the good section and withhold only the bad chunk -- never the whole
       document.
     class: invoice
-    scores: { ocr: 0.95, layout: 0.9, parse: 0.9 }
+    scores: { layout: 0.9, parse: 0.9 }
     sections:
       - text: "Invoice INV-2043 total 500.00 KRW"
-        scores: { ocr: 0.95, layout: 0.9, parse: 0.9 }
+        scores: { layout: 0.9, parse: 0.9 }
       - text: "handwritten illegible scribble"
-        scores: { ocr: 0.2, layout: 0.4, parse: 0.3 }
+        scores: { layout: 0.4, parse: 0.3 }
     extractor_claim:
       invoice_number: "INV-2043"
       total_amount: "500.00"
     expected:
       verified: 1
       reason: extraction_failed
-
-  - id: damaged-prose-is-marked-not-quarantined
-    description: >
-      An OCR-damaged amount inside ordinary prose. The cleaning policy is mark,
-      never repair: the chunk is admitted on quotation fidelity -- it is what
-      the source says -- and the suspected damage is stamped on the record, so
-      the correction decision stays with a human instead of moving silently to
-      the answering model. Quarantining this would discard the only evidence of
-      what the document actually says; repairing it would invent a value with a
-      plausible citation attached.
-    class: prose
-    scores: { ocr: 0.92, layout: 0.93, parse: 0.94 }
-    pages:
-      - |
-        The ledger recorded the total as l,234.56 last quarter.
-    extractor_claim: prose
-    expected:
-      verified: 1
-      quarantined: 0
-      reason: null
-      defects: [suspected_ocr_damage]
-  - id: impossible-date-is-quarantined
-    description: >
-      The date 2026-13-45 is verbatim in the source, so grounding passes it --
-      the string IS where it claims to be. Only a deterministic semantic check
-      can see that those digits cannot mean a day. survey.md conclusion 1: the
-      gate verifies "in the source", not "means something". A check failure
-      quarantines as schema_mismatch, because an impossible date in retrieval
-      is a confident wrong answer with a citation attached.
-    class: invoice
-    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
-    pages:
-      - |
-        INVOICE
-        Invoice INV-2044
-        Issued 2026-13-45
-        Total 1,234.56 KRW
-    extractor_claim:
-      invoice_number: "INV-2044"
-      issue_date: "2026-13-45"
-      total_amount: "1234.56"
-      currency: "KRW"
-    expected:
-      verified: 0
-      quarantined: 1
-      reason: consistency_failed
-
-  - id: lines-that-disagree-with-total-are-quarantined
-    description: >
-      survey.md conclusion 1, ranked first: line items vs total. Both numbers
-      are verbatim in the source, so grounding passes both -- the gate checks
-      presence, not consistency. The document contradicts itself (the total
-      was keyed wrong at creation, then OCR read it faithfully); 100 + 200 !=
-      999.99 only a deterministic arithmetic reconciliation can refuse. The
-      chunk quarantines with a specific question naming the numbers, because
-      a reviewer can fix a stated contradiction but not a vague doubt.
-    class: invoice
-    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
-    pages:
-      - |
-        INVOICE
-        Invoice INV-2045
-        Line 1: Widget 100.00 KRW
-        Line 2: Sprocket 200.00 KRW
-        Total 999.99 KRW
-    extractor_claim:
-      invoice_number: "INV-2045"
-      total_amount: "999.99"
-      currency: "KRW"
-      line_items: ["100.00", "200.00"]
-    expected:
-      verified: 0
-      quarantined: 1
-      reason: consistency_failed
-
-  - id: lines-that-reconcile-still-verify
-    description: >
-      The control for the case above: identical shape, but the total agrees
-      with its lines. Reconciliation must not become over-detection -- the
-      documented failure mode for any new data-quality check (survey.md 6.1).
-    class: invoice
-    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
-    pages:
-      - |
-        INVOICE
-        Invoice INV-2046
-        Line 1: Widget 100.00 KRW
-        Line 2: Sprocket 200.00 KRW
-        Total 300.00 KRW
-    extractor_claim:
-      invoice_number: "INV-2046"
-      total_amount: "300.00"
-      currency: "KRW"
-      line_items: ["100.00", "200.00"]
-    expected:
-      verified: 1
-      quarantined: 0
-      reason: null

@@ -26,8 +26,6 @@ from rag_ingest.gate_tier import (
     select_gate_tier,
 )
 from rag_ingest.ontology import (
-    AbstainReason,
-    DefectCode,
     Extraction,
     FieldAbstention,
     FieldValue,
@@ -36,11 +34,6 @@ from rag_ingest.ontology import (
     ProseKnowledge,
     Unclassified,
 )
-
-#: Characters that OCR routinely confuses. Normalizing them before comparison
-#: is legitimate; normalizing them *into* the value is not, so the gate flags
-#: the substitution it had to make.
-OCR_CONFUSIONS = str.maketrans({"l": "1", "I": "1", "O": "0", "S": "5", "B": "8"})
 
 _WHITESPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[,\s]")
@@ -76,8 +69,6 @@ class GroundingResult(BaseModel):
 
     status: GroundingStatus
     issues: tuple[Issue, ...] = Field(default_factory=tuple)
-    #: True when the gate had to normalize OCR confusions to make a match.
-    needed_normalization: bool = False
 
     @property
     def verified(self) -> bool:
@@ -89,17 +80,6 @@ class GroundingResult(BaseModel):
         """
         return self.status is GroundingStatus.GROUNDED
 
-    @property
-    def matched_through_damage(self) -> bool:
-        """The gate read the value only by normalizing OCR confusions.
-
-        A clean pass and a read-through-damage pass are both GROUNDED -- the
-        value is in the source either way -- but they are not the same claim.
-        This flag keeps the distinction inside the result so callers cannot
-        lose it.
-        """
-        return self.needed_normalization
-
 
 def _normalize(text: str, *, strip_currency: bool = False) -> str:
     collapsed = _WHITESPACE.sub(" ", text).strip()
@@ -109,7 +89,7 @@ def _normalize(text: str, *, strip_currency: bool = False) -> str:
 
 
 def _numeric_key(raw: str) -> Decimal | None:
-    """Parse a number out of OCR-damaged text, or return None.
+    """Parse a number out of a span token, or return None.
 
     Deliberately strict: a string that is not numeric after cleanup yields None
     rather than a best-effort guess, because a wrong number is worse than an
@@ -125,68 +105,36 @@ def _numeric_key(raw: str) -> Decimal | None:
         return None
 
 
-def _loose(text: str) -> str:
-    """Aggressively normalized form for the final comparison tier.
-
-    Strips separators and maps OCR confusions, so ``l,234.56`` and ``1234.56``
-    compare equal. Only used after the stricter tiers fail, and any match made
-    here is reported as ``needed_normalization`` so it stays visible.
-    """
-    translated = _normalize(text.translate(OCR_CONFUSIONS))
-    return re.sub(r"[,.\s|]", "", translated)
-
-
-def _value_matches_span(value: str, span_text: str) -> tuple[bool, bool]:
+def _value_matches_span(value: str, span_text: str) -> bool:
     """Compare a claimed value against raw span text.
 
-    Returns ``(matched, needed_normalization)``.
-
-    Four tiers, cheapest first:
+    Two tiers, cheapest first:
       1. exact substring of the normalized span;
-      2. numeric equality after stripping separators and currency;
-      3. OCR-confusion-normalized substring;
-      4. OCR-confusion-normalized *and* separator-stripped substring.
+      2. numeric equality after stripping separators and currency.
+
+    There is deliberately no character-substitution tier: this pipeline
+    ingests born-digital documents only, so a glyph that is not the claimed
+    character is a mismatch, full stop. A substitution table (l->1, O->0, ...)
+    is how an OCR pipeline forgives its own reader; keeping one here would
+    silently admit values the document does not contain.
     """
     needle = _normalize(value)
     haystack = _normalize(span_text)
     if needle and needle in haystack:
-        return True, False
+        return True
 
     claimed_number = _numeric_key(value)
     if claimed_number is not None and needle:
         # Re-derive every numeric token present in the span and compare.
         for token in re.split(r"[\s|]+", span_text):
             if _numeric_key(token) == claimed_number:
-                return True, False
+                return True
 
-    confused_needle = _normalize(value.translate(OCR_CONFUSIONS))
-    confused_haystack = _normalize(span_text.translate(OCR_CONFUSIONS))
-    if confused_needle and confused_needle in confused_haystack:
-        return True, True
-
-    loose_needle = _loose(value)
-    loose_haystack = _loose(span_text)
-    if loose_needle and loose_needle in loose_haystack:
-        return True, True
-
-    return False, False
+    return False
 
 
 class GroundingGate:
     """Adjudicates extractions mechanically."""
-
-    @staticmethod
-    def defect_codes_for(result: GroundingResult) -> tuple[DefectCode, ...]:
-        """Defect marks earned by this result, regardless of verdict.
-
-        Matching through OCR substitution is evidence of damage the gate itself
-        observed; it must reach ``ChunkRecord.defects`` like any other mark, so
-        the consumer sees it and the correction decision stays with a human.
-        Marks are earned by *how* a match was made, not by whether it passed.
-        """
-        if result.matched_through_damage:
-            return (DefectCode.SUSPECTED_OCR_DAMAGE,)
-        return ()
 
     def __init__(self, raw: RawDocument) -> None:
         self._raw = raw
@@ -211,7 +159,6 @@ class GroundingGate:
             return self._check_prose(extraction, resolved_tier)
 
         issues: list[Issue] = []
-        normalized = False
         fields = (
             ("invoice_number", extraction.invoice_number),
             ("issue_date", extraction.issue_date),
@@ -226,26 +173,16 @@ class GroundingGate:
         for name, field in fields:
             if isinstance(field, FieldAbstention):
                 abstained += 1
-                if field.reason is AbstainReason.ILLEGIBLE:
-                    issues.append(
-                        Issue(
-                            field=name,
-                            status=GroundingStatus.ABSTAINED,
-                            message=f"declined to extract: {field.reason}",
-                        )
+                issues.append(
+                    Issue(
+                        field=name,
+                        status=GroundingStatus.ABSTAINED,
+                        message=f"declined to extract: {field.reason}",
                     )
-                else:
-                    issues.append(
-                        Issue(
-                            field=name,
-                            status=GroundingStatus.ABSTAINED,
-                            message=f"declined to extract: {field.reason}",
-                        )
-                    )
+                )
                 continue
 
-            issue, did_normalize = self._check_field(name, field)
-            normalized = normalized or did_normalize
+            issue = self._check_field(name, field)
             if issue is not None:
                 issues.append(issue)
 
@@ -253,14 +190,12 @@ class GroundingGate:
             return GroundingResult(
                 status=GroundingStatus.MISMATCH,
                 issues=tuple(issues),
-                needed_normalization=normalized,
             )
 
         if any(issue.status is GroundingStatus.UNVERIFIABLE for issue in issues):
             return GroundingResult(
                 status=GroundingStatus.UNVERIFIABLE,
                 issues=tuple(issues),
-                needed_normalization=normalized,
             )
 
         if abstained == len(fields):
@@ -269,7 +204,6 @@ class GroundingGate:
             return GroundingResult(
                 status=GroundingStatus.ABSTAINED,
                 issues=tuple(issues),
-                needed_normalization=normalized,
             )
 
         # Partial extraction is not verification. An invoice where only the
@@ -282,13 +216,11 @@ class GroundingGate:
             return GroundingResult(
                 status=GroundingStatus.INCOMPLETE,
                 issues=tuple(issues),
-                needed_normalization=normalized,
             )
 
         return GroundingResult(
             status=GroundingStatus.GROUNDED,
             issues=tuple(issues),
-            needed_normalization=normalized,
         )
 
     def _check_prose(
@@ -306,13 +238,9 @@ class GroundingGate:
         a one-field shape yields INCOMPLETE instead of silently receiving the lenient
         verdict, so a caller cannot get a relaxed answer by accident.
         """
-        issue, did_normalize = self._check_field("text", extraction.text)
+        issue = self._check_field("text", extraction.text)
         if issue is not None:
-            return GroundingResult(
-                status=issue.status,
-                issues=(issue,),
-                needed_normalization=did_normalize,
-            )
+            return GroundingResult(status=issue.status, issues=(issue,))
         required = MIN_FIELDS_BY_TIER[tier]
         if required > 1:
             return GroundingResult(
@@ -326,52 +254,28 @@ class GroundingGate:
                         ),
                     ),
                 ),
-                needed_normalization=did_normalize,
             )
-        return GroundingResult(
-            status=GroundingStatus.GROUNDED, needed_normalization=did_normalize
-        )
+        return GroundingResult(status=GroundingStatus.GROUNDED)
 
-    def _check_field(
-        self, name: str, field: FieldValue
-    ) -> tuple[Issue | None, bool]:
+    def _check_field(self, name: str, field: FieldValue) -> Issue | None:
         ref = field.provenance
         if not ref.is_well_formed():
-            return (
-                Issue(
-                    field=name,
-                    status=GroundingStatus.UNVERIFIABLE,
-                    message="provenance span is malformed",
-                ),
-                False,
+            return Issue(
+                field=name,
+                status=GroundingStatus.UNVERIFIABLE,
+                message="provenance span is malformed",
             )
 
         span_text = self._raw.span_text(ref)
         if span_text is None:
-            return (
-                Issue(
-                    field=name,
-                    status=GroundingStatus.UNVERIFIABLE,
-                    message="provenance span does not resolve in raw source",
-                ),
-                False,
+            return Issue(
+                field=name,
+                status=GroundingStatus.UNVERIFIABLE,
+                message="provenance span does not resolve in raw source",
             )
 
-        matched, did_normalize = _value_matches_span(field.value, span_text)
-        if matched:
-            if did_normalize:
-                return (
-                    Issue(
-                        field=name,
-                        status=GroundingStatus.GROUNDED,
-                        message="matched only after OCR-confusion normalization",
-                    ),
-                    True,
-                )
-            return None, False
-
-        return (
-            Issue(
+        if not _value_matches_span(field.value, span_text):
+            return Issue(
                 field=name,
                 status=GroundingStatus.MISMATCH,
                 message=(
@@ -379,9 +283,8 @@ class GroundingGate:
                     f"p{ref.page}[{ref.char_start}:{ref.char_end}] "
                     f"({span_text[:80]!r})"
                 ),
-            ),
-            False,
-        )
+            )
+        return None
 
     def _check_unclassified(self, extraction: Unclassified) -> GroundingResult:
         ref = extraction.provenance

@@ -1,7 +1,7 @@
 """Gate strictness: which bar a claimed record must clear to be retrievable.
 
 Distinct from ``tiering.Tier``, which decides whether an element is worth
-interpreting at all (OCR and layout quality). This module decides the bar a
+interpreting at all (parse and layout quality). This module decides the bar a
 record is held to *after* an extractor has claimed one. Same word, two different
 questions; keeping them in separate modules keeps both honest.
 

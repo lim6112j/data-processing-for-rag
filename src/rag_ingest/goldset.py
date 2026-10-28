@@ -36,9 +36,6 @@ class Expected(BaseModel):
     reason: str | None = None
     not_retrievable: tuple[str, ...] = Field(default_factory=tuple)
     table_chunks: int | None = None
-    #: Defect codes that must appear on the verified records. Asserts marking,
-    #: not repair: a case that admits damaged text must keep doing so visibly.
-    defects: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class GoldCase(BaseModel):
@@ -73,7 +70,6 @@ def _element_scores(raw: dict[str, float] | None) -> ElementScores:
         return ElementScores()
     return ElementScores(
         layout_score=raw.get("layout"),
-        ocr_score=raw.get("ocr"),
         parse_score=raw.get("parse"),
     )
 
@@ -219,15 +215,6 @@ def check_case(case: GoldCase, outcome, verified_hits: list[str]) -> CaseResult:
         if len(table_chunks) != expected.table_chunks:
             failures.append(
                 f"expected {expected.table_chunks} table chunk(s), got {len(table_chunks)}"
-            )
-
-    if expected.defects:
-        marked = {defect.value for record in outcome.verified_chunks for defect in record.defects}
-        missing = [d for d in expected.defects if d not in marked]
-        if missing:
-            failures.append(
-                f"expected defect mark(s) {missing} on verified records, got "
-                f"{sorted(marked)}"
             )
 
     return CaseResult(case_id=case.id, passed=not failures, failures=tuple(failures))

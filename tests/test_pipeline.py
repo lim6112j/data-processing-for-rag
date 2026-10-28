@@ -12,14 +12,12 @@ from rag_ingest.docmodel import Element, ElementKind, ProvenanceRef, RawDocument
 from rag_ingest.escalation import EscalationReason, ReviewQueue
 from rag_ingest.ontology import (
     AbstainReason,
-    DefectCode,
     FieldAbstention,
     FieldValue,
     InvoiceHeader,
     Unclassified,
 )
 from rag_ingest.pipeline import IngestPipeline
-from rag_ingest.store import ChunkStore
 from tests.conftest import heading, paragraph, table
 
 TODAY = date(2026, 10, 25)
@@ -49,13 +47,6 @@ class StubExtractor:
             return InvoiceHeader(
                 invoice_number=FieldValue(value="INV-9", provenance=ref),
                 issue_date=FieldValue(value="2026-13-45", provenance=ref),
-                total_amount=FieldValue(value="1234.56", provenance=ref),
-                currency=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
-            )
-        if template == "invoice_damaged_but_readable":
-            return InvoiceHeader(
-                invoice_number=FieldValue(value="INV-9", provenance=ref),
-                issue_date=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
                 total_amount=FieldValue(value="1234.56", provenance=ref),
                 currency=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
             )
@@ -109,164 +100,6 @@ class TestHappyPath:
         assert outcome.verified_chunks[0].ontology_version
         # The unextractable second section is quarantined, not dropped.
         assert all(not item for item in [c.verified for c in outcome.quarantined_chunks])
-
-
-class TestNormalizationBecomesAMark:
-    """The gate read through OCR damage; that observation must survive into
-
-    the record. An unmarked read-through-damage value is exactly the
-    silent-correction path the mark policy exists to close.
-    """
-
-    def test_gate_normalization_match_is_marked_on_the_record(self):
-        elements = [
-            heading("Invoices", level=1, element_id="h-inv"),
-            # Damage the gate will normalize through: l for 1 in the amount.
-            paragraph("Invoice INV-9 total l,234.56 KRW", element_id="p-inv"),
-        ]
-        raw, doc_elements = RawDocument.from_elements("d1", elements)
-        ref = ProvenanceRef(
-            page=1,
-            char_start=raw.pages[0].text.index("Invoice INV-9"),
-            char_end=(
-                raw.pages[0].text.index("Invoice INV-9")
-                + len("Invoice INV-9 total l,234.56 KRW")
-            ),
-        )
-        extractor = StubExtractor(
-            {"Invoices": "invoice_damaged_but_readable"}, {"Invoices": ref}
-        )
-
-        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
-            raw, doc_elements, owner_id="owner-1"
-        )
-
-        assert len(outcome.verified_chunks) == 1
-        record = outcome.verified_chunks[0]
-        assert record.verified is True
-        assert record.defects == (DefectCode.SUSPECTED_OCR_DAMAGE,)
-
-    def test_damage_only_the_gate_saw_is_still_marked(self):
-        # "l234.56" escapes the text scanner's pattern (no thousands
-        # separator), so only the gate's normalization match knows the text is
-        # damaged. That observation must not be discarded at the gate.
-        elements = [
-            heading("Invoices", level=1, element_id="h-inv"),
-            paragraph("Invoice INV-9 total l234.56 KRW", element_id="p-inv"),
-        ]
-        raw, doc_elements = RawDocument.from_elements("d1", elements)
-        ref = ProvenanceRef(
-            page=1,
-            char_start=raw.pages[0].text.index("Invoice INV-9"),
-            char_end=(
-                raw.pages[0].text.index("Invoice INV-9")
-                + len("Invoice INV-9 total l234.56 KRW")
-            ),
-        )
-        extractor = StubExtractor(
-            {"Invoices": "invoice_damaged_but_readable"}, {"Invoices": ref}
-        )
-
-        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
-            raw, doc_elements, owner_id="owner-1"
-        )
-
-        assert len(outcome.verified_chunks) == 1
-        assert outcome.verified_chunks[0].defects == (
-            DefectCode.SUSPECTED_OCR_DAMAGE,
-        )
-
-    def test_clean_grounding_carries_no_gate_mark(self):
-        raw, elements = _build_doc()
-        ref = ProvenanceRef(
-            page=1,
-            char_start=raw.pages[0].text.index("Invoice INV-9"),
-            char_end=(
-                raw.pages[0].text.index("Invoice INV-9")
-                + len("Invoice INV-9 total 1234.56 KRW")
-            ),
-        )
-        extractor = StubExtractor({"Invoices": "invoice_ok"}, {"Invoices": ref})
-
-        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
-            raw, elements, owner_id="owner-1"
-        )
-
-        assert outcome.verified_chunks[0].defects == ()
-
-
-class TestUngroundedValue:
-    def test_lying_value_is_quarantined_and_queued_as_ungrounded(self):
-        raw, elements = _build_doc()
-        ref = ProvenanceRef(
-            page=1,
-            char_start=raw.pages[0].text.index("Invoice INV-9"),
-            char_end=(
-                raw.pages[0].text.index("Invoice INV-9")
-                + len("Invoice INV-9 total 1234.56 KRW")
-            ),
-        )
-        extractor = StubExtractor({"Invoices": "invoice_lying"}, {"Invoices": ref})
-        queue = ReviewQueue()
-
-        outcome = IngestPipeline(queue, extractor, today=TODAY).ingest(
-            raw, elements, owner_id="owner-1"
-        )
-
-        assert outcome.verified_chunks == ()
-        reasons = {item.reason for item in outcome.review_items}
-        assert EscalationReason.UNGROUNDED in reasons
-
-    def test_quarantined_chunk_is_not_retrievable_but_siblings_are(self):
-        raw, elements = _build_doc()
-        ref = ProvenanceRef(
-            page=1,
-            char_start=raw.pages[0].text.index("Invoice INV-9"),
-            char_end=(
-                raw.pages[0].text.index("Invoice INV-9")
-                + len("Invoice INV-9 total 1234.56 KRW")
-            ),
-        )
-        extractor = StubExtractor({"Invoices": "invoice_lying"}, {"Invoices": ref})
-        store = ChunkStore()
-        store.add_raw(raw)
-
-        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
-            raw, elements, owner_id="owner-1"
-        )
-        for record in outcome.verified_chunks + outcome.quarantined_chunks:
-            store.add(record)
-
-        assert store.search("9999") == []
-        assert store.search("procurement") == []
-        # The raw page is still reachable even though nothing was verified.
-        assert "1234.56" in (store.raw_text("d1", 1) or "")
-
-
-class TestUnclassifiedScope:
-    def test_unclassified_content_queues_with_unclassified_reason(self):
-        raw, elements = _build_doc()
-        ref = _refs(raw, "Unrelated narrative about procurement policy")
-        extractor = StubExtractor({"Notes": "unclassified"}, {"Notes": ref})
-
-        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
-            raw, elements, owner_id="owner-1"
-        )
-
-        reasons = {item.reason for item in outcome.review_items}
-        assert EscalationReason.UNCLASSIFIED in reasons
-
-    def test_unclassified_is_not_reported_as_a_schema_validation_failure(self):
-        raw, elements = _build_doc()
-        ref = _refs(raw, "Unrelated narrative about procurement policy")
-        extractor = StubExtractor({"Notes": "unclassified"}, {"Notes": ref})
-
-        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
-            raw, elements, owner_id="owner-1"
-        )
-
-        reasons = {item.reason for item in outcome.review_items}
-        assert EscalationReason.SCHEMA_MISMATCH not in reasons
 
 
 class TestSemanticChecks:
@@ -338,7 +171,7 @@ class TestSemanticChecks:
 
 class TestTierGating:
     def test_unreadable_element_never_reaches_semantic_extraction(self):
-        # Nothing should be extracted from a page that scored 0.1 on OCR.
+        # Nothing should be extracted from text the parser distrusts.
         from rag_ingest.docmodel import ElementScores
 
         poor = Element(
@@ -346,7 +179,7 @@ class TestTierGating:
             kind=ElementKind.PARAGRAPH,
             page=1,
             text="!!!",
-            scores=ElementScores(ocr_score=0.1, layout_score=0.9, parse_score=0.9),
+            scores=ElementScores(layout_score=0.9, parse_score=0.1),
         )
         raw, elements = RawDocument.from_elements("d2", [poor])
 

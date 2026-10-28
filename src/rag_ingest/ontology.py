@@ -27,28 +27,10 @@ ONTOLOGY_VERSION = "1.1.0"
 PIPELINE_VERSION = "0.1.0"
 
 
-class DefectCode(StrEnum):
-    """A visible defect in text that was admitted anyway.
-
-    The project's cleaning policy is mark, never repair: an LLM repairs almost
-    nothing correctly (survey.md §1, max repair-match 0.028) and human edit
-    systems introduce errors at nearly the rate they fix them (§6.1). So damaged
-    text enters retrieval as what the source says, carrying a mark, and the
-    correction decision stays with a human instead of moving silently to the
-    consumer.
-
-    Closed enum, like ``AbstainReason``: a defect code is a triageable fact, not
-    a free-text note.
-    """
-
-    SUSPECTED_OCR_DAMAGE = "suspected_ocr_damage"
-
-
 class AbstainReason(StrEnum):
     """Why an extraction declined. Closed enum: the queue must be triageable."""
 
     NOT_PRESENT = "not_present"
-    ILLEGIBLE = "illegible"
     AMBIGUOUS = "ambiguous"
     OUT_OF_ONTOLOGY = "out_of_ontology"
 
@@ -209,11 +191,6 @@ class ChunkRecord(BaseModel):
     #: not the same claim, and mixing them silently is the ambiguity this project
     #: exists to remove.
     gate_tier: GateTier | None = None
-    #: Defects observed in the admitted text, marked rather than repaired.
-    #: Populated for verified records only -- a mark is a statement about text
-    #: that entered retrieval, and stamping quarantined chunks would blur the one
-    #: distinction the store keeps.
-    defects: tuple[DefectCode, ...] = ()
 
 
 __all__ = [
@@ -221,7 +198,6 @@ __all__ = [
     "PIPELINE_VERSION",
     "AbstainReason",
     "ChunkRecord",
-    "DefectCode",
     "Extraction",
     "FieldAbstention",
     "FieldValue",

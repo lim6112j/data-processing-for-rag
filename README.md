@@ -15,8 +15,8 @@ The problem it exists for: most pipelines gate on "does the extracted output
 validate against a schema?" When the extractor is a constrained-decoding LLM, that
 question is answered by construction — the decoder masks invalid tokens, so it is
 impossible to emit a schema violation. A schema-valid result therefore carries
-**zero** evidence of correctness, and the OCR-damaged number (`l,234.56` read as
-`1334.56`) passes straight into retrieval with a citation attached.
+**zero** evidence of correctness, and an invented total (`1334.56` where the
+document says `1234.56`) passes straight into retrieval with a citation attached.
 
 The fix is to gate on **grounding instead of shape**. Every extracted value cannot
 be represented without a provenance span pointing at the raw source; the gate
@@ -54,12 +54,9 @@ range checks that are meant to separate them are not built yet. `LENIENT` verifi
 this place". Every record stamps its tier, so the two claims are never conflated.
 A LENIENT bar on a typed record raises rather than quietly admitting it.
 
-The cleaning policy for damaged text is **mark, never repair**. An admitted chunk
-whose text carries an OCR-damage pattern is stamped `defects=("suspected_ocr_damage",)`
-and stays retrievable as what the source says. Repair is not attempted -- the best
-LLM repair configuration in the survey matched a reference 0.028 of the time, and
-unmarked damage simply moves the correction into the answering model, silently.
-The mark keeps that decision with a human.
+The corpus is born-digital documents only, so there is no OCR stage and no
+damage-repair machinery: the text layer is the source, and a value the document
+does not contain is a mismatch, not something to read through.
 
 ```bash
 uv run pytest                          # 356 tests, no network
@@ -77,8 +74,8 @@ page image with **green boxes** on regions that entered retrieval and **red
 boxes** on regions withheld, each chunk's tier route with its scores, and the
 review queue on the right.
 
-The withheld box lands exactly on the damaged characters, which is the point —
-you can see `l,234.56` and watch the gate refuse to turn it into `1,234.56`.
+The withheld box lands exactly on the chunk whose total the document does not
+support — you can watch the gate refuse the invented value.
 
 ```bash
 uv run rag-demo
@@ -103,7 +100,7 @@ screenshots below are from that run.
 | Case | Result |
 |---|---|
 | Readable invoice | 100% verified, green box, empty queue |
-| OCR-damaged (`l,234.56`) | 0% verified, red box, queued as `incomplete_extraction` |
+| Invented total | 0% verified, red box, queued as `incomplete_extraction` |
 | T2 enabled | two candidates shown, pick recorded, **still withheld** until confirmed |
 | After confirming | precision 100%, breaker `closed`, queue 2 → 1 |
 
@@ -168,11 +165,11 @@ decoding the decoder masks invalid tokens during generation, so schema
 conformance is guaranteed by construction and carries **zero** evidence of
 correctness.
 
-Concretely: OCR reads `l,234.56`. The schema wants a decimal. The decoder cannot
-emit invalid JSON, so it emits `1334.56`. Validation passes, the chunk enters
-retrieval, and the system returns a confidently wrong number with a citation.
-That is worse than quarantining it, and it is the default outcome of a
-shape-only gate.
+Concretely: the extractor emits `1334.56`. The schema wants a decimal. The
+decoder cannot emit invalid JSON, so a schema-valid but invented total sails
+through. Validation passes, the chunk enters retrieval, and the system returns a
+confidently wrong number with a citation. That is worse than quarantining it, and
+it is the default outcome of a shape-only gate.
 
 `tests/test_grounding.py::TestCentralClaim::test_schema_valid_but_ungrounded_value_is_rejected`
 is that case, executable.
@@ -380,10 +377,9 @@ a total it did not carry. `MIN_EXTRACTED_FIELDS = 2` makes a thin record
 `ABSTAINED` (nothing found). This is a required-evidence rule, not a knob to
 lower when the queue gets busy.
 
-**A damaged value is not an absent value.** OCR reading `l,234.56` for `1,234.56`
-used to be reported as `NOT_PRESENT`, which turned an extraction failure into a
-clean-looking abstention and hid it from the metrics. It is now `ILLEGIBLE`, and
-it correctly blocks verification:
+**A missing field is named, not papered over.** An extraction that declines a
+field reports `NOT_PRESENT` — a legitimate abstention — and the required-evidence
+rule still blocks verification:
 
 ```bash
 $ uv run rag-goldset --corpus ./invoices
@@ -463,7 +459,8 @@ rather than failing.
 ```
 src/rag_ingest/
   docmodel.py     raw element tree + the adapter boundary to Docling/Unstructured
-  tiering.py      OCR/layout score -> tier selector (before any semantics)
+  checks.py       deterministic semantic checks after the gate: dates, arithmetic
+  tiering.py      parse/layout score -> tier selector (before any semantics)
   chunking.py     structure-preserving, heading-aware chunks
   ontology.py     ontology v1 (small on purpose) + version stamps
   grounding.py    provenance re-derivation -- the check a schema cannot fake
@@ -482,7 +479,6 @@ src/rag_ingest/
     openrouter.py T2 backend: structured output, image input, degrades safely
   pipeline.py     T0 -> T1 -> T2 -> quarantine orchestration
   gate_tier.py    which bar a claimed record must clear, from its ontology type
-  defects.py      mechanical defect marking on admitted text -- mark, never repair
   goldset.py      gold-set loader, replay extractor, decision checker
   cli.py          `rag-goldset`
   demo/
@@ -524,9 +520,12 @@ Stated so they are not mistaken for oversights:
 - **Docling confidence is page-level, not per element.** The API exposes
   `confidence.pages[n]`; there is no per-element attribution. Every element on
   a page inherits that page's scores, so one bad table drags the whole page's
-  OCR score down and the tier selector acts page-wise. `table_score` comes back
+  parse score down and the tier selector acts page-wise. `table_score` comes back
   as `nan` — documented unimplemented — and is dropped rather than passed
   through, since a `nan` makes every threshold comparison false.
+- **Born-digital only.** Docling's OCR pass is disabled (`do_ocr=False`); the
+  text layer is the source of truth. A scanned page with no text layer has
+  nothing to verify against and escalates rather than guesses.
 - **No persisted queue.** The WIP limit and staleness policy are the substance;
   persisting them is a deployment detail.
 
@@ -541,18 +540,17 @@ and per-class, because a 5% global rate can hide 100% on one high-volume class.
 
 ## Known limitations
 
-- **T1 cannot catch a self-consistent OCR error.** The gate re-derives values
-  from the *text buffer*, so if OCR read `l,234.56` consistently, a claim of
-  `1234.56` can pass. T2 sees the page image and closes that gap — which is a
-  concrete reason T2 earns its keep beyond parser disagreements.
-- `_value_matches_span` has four comparison tiers; tier 4 (separator-stripped)
-  is permissive. It reports `needed_normalization: True` so permissive matches
-  stay visible rather than silently accepted.
+- **T1 cannot catch two consistent-but-wrong numbers.** The gate re-derives
+  values from the *text buffer*, so a total that contradicts its own line items
+  passes if both are verbatim. The deterministic checks in `checks.py` close
+  part of that gap (dates, arithmetic); T2's page-image path covers the rest.
+- Ontology v1 deliberately covers two shapes only. Extend it from the cluster
+  report on a real seed corpus, not from imagination.
 - Ontology v1 deliberately covers two shapes only. Extend it from the cluster
   report on a real seed corpus, not from imagination.
 - **`verified` is a weaker claim than it sounds.** It means "the value appears in
   the parser's text buffer where it claims to", not "the value is correct". A
-  self-consistent OCR error passes. See [survey.md](survey.md) §3 on why span
+  self-consistent wrong number passes. See [survey.md](survey.md) §3 on why span
   validity does not imply claim support.
 - `RawDocument.from_elements` synthesizes page text by joining element
   renderings. Both shipped adapters go through it, so provenance spans index into

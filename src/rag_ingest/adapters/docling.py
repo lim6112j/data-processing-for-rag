@@ -78,9 +78,8 @@ def _finite(value: Any) -> float | None:
     """Coerce a Docling score, treating ``nan`` as absent.
 
     Docling emits ``nan`` for scores it does not compute -- ``table_score`` is
-    documented as not yet implemented and ``ocr_score`` is ``nan`` on pages with
-    no OCR pass. Passing ``nan`` through would make every comparison false and
-    every threshold decision silently wrong.
+    documented as not yet implemented. Passing ``nan`` through would make every
+    comparison false and every threshold decision silently wrong.
     """
     if value is None:
         return None
@@ -107,7 +106,6 @@ def page_scores(document: Any, confidence: Any) -> dict[int, ElementScores]:
     for page_no, entry in pages.items():
         scores[int(page_no)] = ElementScores(
             layout_score=_finite(getattr(entry, "layout_score", None)),
-            ocr_score=_finite(getattr(entry, "ocr_score", None)),
             parse_score=_finite(getattr(entry, "parse_score", None)),
         )
     return scores
@@ -229,7 +227,6 @@ def pdf_to_raw(
     render_images: bool = True,
     images_scale: float = 2.0,
     do_table_structure: bool = True,
-    do_ocr: bool = True,
     table_mode: str = "accurate",
 ) -> tuple[RawDocument, list[Element]]:
     """Parse a PDF with Docling into the docmodel contract.
@@ -260,7 +257,10 @@ def pdf_to_raw(
     options.generate_page_images = render_images
     options.images_scale = images_scale
     options.do_table_structure = do_table_structure
-    options.do_ocr = do_ocr
+    # Born-digital corpus: the text layer is the source, so Docling's OCR
+    # pass is off. Enabling it would change the text the pipeline verifies
+    # against and re-introduce an OCR-forgiveness path this pipeline drops.
+    options.do_ocr = False
     if do_table_structure:
         options.table_structure_options.mode = (
             TableFormerMode.ACCURATE

@@ -89,7 +89,7 @@ class TestVisualEvidenceRequirement:
         )
 
         assert decision.kind == "abstain"
-        assert decision.reason is AbstainReason.ILLEGIBLE
+        assert decision.reason is AbstainReason.AMBIGUOUS
         assert client.chat.completions.calls == []
 
 
@@ -143,7 +143,7 @@ class TestDecisionParsing:
             _adjudicator(abstain)
             .adjudicate_with_evidence(_question(), image_png=b"PNG")
             .reason
-            is AbstainReason.ILLEGIBLE
+            is AbstainReason.AMBIGUOUS
         )
         assert (
             _adjudicator(escalate)
@@ -198,7 +198,7 @@ class TestPipelineIntegration:
             page=1,
             text="",
             table_rows=(("a", "b"), ("c", "d")),
-            scores=ElementScores(layout_score=0.2, ocr_score=0.95, parse_score=0.95),
+            scores=ElementScores(layout_score=0.2, parse_score=0.95),
             bbox=BBOX,
         )
         raw, elements = RawDocument.from_elements("d1", [element], page_images={1: b"PNG"})

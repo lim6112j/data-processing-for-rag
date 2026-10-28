@@ -457,7 +457,9 @@ class TestStructureAndIncompleteCoexist:
 
         question = view.review_items[0].question
         assert "Two parsers read it differently" in question
-        assert "could not read total amount" in question
+        # The structural question must keep the grounding detail: it names the
+        # missing fields so the reviewer can answer both questions at once.
+        assert "did not find issue date, total amount and currency" in question
 
     def test_grounding_mismatch_still_never_reaches_t2(self):
         from rag_ingest.adjudication import AdjudicationDecision

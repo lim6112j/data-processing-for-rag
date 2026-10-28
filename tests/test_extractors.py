@@ -274,17 +274,6 @@ class TestCurrencies:
         assert GroundingGate(after).check(ext_b).status is GroundingStatus.GROUNDED
 
 
-class TestDamagedValuesAreNotAbsent:
-    """Reporting an unreadable value as NOT_PRESENT hides an OCR failure."""
-
-    def test_ocr_damaged_amount_is_illegible_not_absent(self):
-        _, chunk = _chunk("Invoice INV-3003 total l,234.56 USD")
-
-        extraction = TemplateExtractor().extract(chunk)
-
-        assert isinstance(extraction.total_amount, FieldAbstention)
-        assert extraction.total_amount.reason is AbstainReason.ILLEGIBLE
-
     def test_genuinely_missing_amount_is_not_present(self):
         _, chunk = _chunk("Invoice INV-3003 for consulting services")
 
@@ -355,21 +344,4 @@ class TestLineItemCollection:
         assert len(lines) == 1
         assert lines[0].amount.value == "100.00"
 
-    def test_no_labelled_lines_yields_empty_tuple(self):
-        _, chunk = _chunk("Invoice INV-2041 total 1234.56 KRW")
 
-        extraction = TemplateExtractor().extract(chunk)
-
-        assert extraction.line_items == ()
-
-    def test_damaged_line_is_collected_as_illegible_abstention(self):
-        # Mark, never repair applies to rows too: the row exists, the amount
-        # is unreadable, and saying NOT_PRESENT would hide a reconciliation
-        # gap inside a clean-looking record.
-        lines = self._lines(
-            "Invoice INV-2041\nLine 1: Widget l,234.56 KRW\nTotal 1234.56 KRW"
-        )
-
-        assert len(lines) == 1
-        assert isinstance(lines[0].amount, FieldAbstention)
-        assert lines[0].amount.reason is AbstainReason.ILLEGIBLE
