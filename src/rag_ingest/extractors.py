@@ -26,6 +26,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from rag_ingest.chunking import Chunk, ChunkKind
+from rag_ingest.docmodel import ProvenanceRef
 from rag_ingest.ontology import (
     AbstainReason,
     Extraction,
@@ -285,11 +286,13 @@ class ProseExtractor:
     exactly what a LENIENT gate can check. Anything stronger would be a claim
     this extractor cannot support.
 
-    A chunk spanning pages is declined. ``ProvenanceRef`` cites one page, so a
-    multi-page chunk cannot be quoted through a single resolvable span, and
-    quoting only its first page would quietly understate what was admitted. On a
-    646-page manual 96% of chunks are single-page (``corpus/README.md``), so the
-    honest refusal costs little; the alternative costs the meaning of "verified".
+    A chunk spanning pages is quoted through a *composition*: one
+    ``ProvenanceRef`` per page it touches, in page order, carried in
+    ``FieldValue.multi_page_spans``. The gate verifies the ordered join of the
+    per-page slices, so the fidelity guarantee survives the boundary. Quoting
+    only the first page would quietly understate what was admitted, and
+    refusing measured at 32 of 754 chunks (4.2%) on the FAA manual -- an honest
+    refusal, but one that no longer needs to happen.
     """
 
     def extract(self, chunk: Chunk) -> Extraction | None:
@@ -297,10 +300,7 @@ class ProseExtractor:
         if not text:
             return None
         if chunk.page_start != chunk.page_end:
-            return Unclassified(
-                observed_shape="multi_page_span",
-                provenance=_whole_chunk_span(chunk),
-            )
+            return self._quote_multi_page(chunk)
         span = _chunk_span(chunk)
         if span is None:
             return Unclassified(
@@ -308,6 +308,46 @@ class ProseExtractor:
                 provenance=_whole_chunk_span(chunk),
             )
         return ProseKnowledge(text=FieldValue(value=text, provenance=span))
+
+    def _quote_multi_page(self, chunk: Chunk) -> Extraction | None:
+        """Quote a cross-page chunk as one ref per page, in order.
+
+        ``provenance`` carries the first page's span so every consumer that
+        reads ``.provenance`` (bbox overlay, review questions, T2 evidence)
+        still has a valid single-page anchor; ``multi_page_spans`` carries the
+        complete story. Segments whose raw slice is empty are skipped -- they
+        contribute no characters and would make the join unresolvable.
+        """
+        spans: list[ProvenanceRef] = []
+        by_page: dict[int, list] = {}
+        for segment in chunk.segments:
+            by_page.setdefault(segment.page, []).append(segment)
+        for page_no in sorted(by_page):
+            page_segments = by_page[page_no]
+            first, last = page_segments[0], page_segments[-1]
+            if last.raw_end <= first.raw_start:
+                continue
+            spans.append(
+                ProvenanceRef(
+                    page=page_no,
+                    char_start=first.raw_start,
+                    char_end=last.raw_end,
+                    element_id=first.element_id,
+                    bbox=first.bbox,
+                )
+            )
+        if not spans:
+            return Unclassified(
+                observed_shape=_shape_hint(chunk),
+                provenance=_whole_chunk_span(chunk),
+            )
+        return ProseKnowledge(
+            text=FieldValue(
+                value=chunk.text.strip(),
+                provenance=spans[0],
+                multi_page_spans=tuple(spans),
+            )
+        )
 
 
 class LayeredExtractor:

@@ -237,8 +237,17 @@ class GroundingGate:
         The tier is still applied rather than assumed. Asking for a two-field bar on
         a one-field shape yields INCOMPLETE instead of silently receiving the lenient
         verdict, so a caller cannot get a relaxed answer by accident.
+
+        A multi-page quote is verified as the ordered join of its per-page
+        slices -- not as "some span matches". Verifying only the first page
+        would admit an invented page two; verifying any single page would
+        admit an edit on the other. The join keeps the fidelity guarantee
+        whole across the boundary.
         """
-        issue = self._check_field("text", extraction.text)
+        if extraction.text.multi_page_spans:
+            issue = self._check_multi_page_quote(extraction.text)
+        else:
+            issue = self._check_field("text", extraction.text)
         if issue is not None:
             return GroundingResult(status=issue.status, issues=(issue,))
         required = MIN_FIELDS_BY_TIER[tier]
@@ -256,6 +265,27 @@ class GroundingGate:
                 ),
             )
         return GroundingResult(status=GroundingStatus.GROUNDED)
+
+    def _check_multi_page_quote(self, field: FieldValue) -> Issue | None:
+        """The quoted text must equal the ordered join of its page slices."""
+        assert field.multi_page_spans is not None
+        joined = self._raw.span_text_multi(field.multi_page_spans)
+        if joined is None:
+            return Issue(
+                field="text",
+                status=GroundingStatus.UNVERIFIABLE,
+                message="a page slice of the multi-page quote does not resolve",
+            )
+        if _normalize(field.value) != _normalize(joined):
+            return Issue(
+                field="text",
+                status=GroundingStatus.MISMATCH,
+                message=(
+                    "quoted text does not match the pages it cites "
+                    f"({len(field.multi_page_spans)} pages cited)"
+                ),
+            )
+        return None
 
     def _check_field(self, name: str, field: FieldValue) -> Issue | None:
         ref = field.provenance

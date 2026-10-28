@@ -192,9 +192,10 @@ class TestProseExtractorScope:
         assert extraction.text.value == "Narrative content about fasteners."
         assert raw.span_text(extraction.text.provenance) is not None
 
-    def test_multi_page_chunk_is_declined_not_partially_quoted(self):
-        # Quoting only the first page would understate what was admitted, and a
-        # ProvenanceRef cites exactly one page.
+    def test_multi_page_chunk_is_quoted_through_per_page_spans(self):
+        # A multi-page quote cites one span per page and the gate verifies the
+        # ordered join, so quoting no longer has to refuse at a page boundary
+        # (previously 32/754 chunks on the FAA manual).
         _, elements = RawDocument.from_elements(
             "d1",
             [
@@ -207,8 +208,9 @@ class TestProseExtractorScope:
 
         extraction = ProseExtractor().extract(chunk)
 
-        assert isinstance(extraction, Unclassified)
-        assert extraction.observed_shape == "multi_page_span"
+        assert isinstance(extraction, ProseKnowledge)
+        assert extraction.text.multi_page_spans is not None
+        assert len(extraction.text.multi_page_spans) == 2
 
     def test_empty_chunk_yields_none(self):
         _, chunk = _raw_and_chunk("something")

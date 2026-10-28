@@ -206,6 +206,24 @@ class RawDocument(BaseModel):
                 return candidate
         return None
 
+    def span_text_multi(self, refs: tuple[ProvenanceRef, ...]) -> str | None:
+        """Join the per-page slices of a multi-page quotation, in order.
+
+        Returns None when any slice fails to resolve -- a partially resolvable
+        multi-page quote is unverifiable, never partially verified. Slices are
+        joined with the same blank-line separator the chunker uses, so the
+        quoted text and the joined slices are comparable without guessing.
+        """
+        parts: list[str] = []
+        for ref in refs:
+            part = self.span_text(ref)
+            if part is None:
+                return None
+            parts.append(part)
+        if not parts:
+            return None
+        return "\n\n".join(parts)
+
     def span_text(self, ref: ProvenanceRef) -> str | None:
         """Return the raw text a provenance reference designates.
 

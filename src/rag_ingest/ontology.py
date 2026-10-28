@@ -36,13 +36,24 @@ class AbstainReason(StrEnum):
 
 
 class FieldValue(BaseModel):
-    """A successfully extracted value, inseparable from its provenance span."""
+    """A successfully extracted value, inseparable from its provenance.
+
+    ``provenance`` is always present: the single-page span, and for a
+    single-page value the whole story. A multi-page quotation additionally
+    carries ``multi_page_spans`` -- one ``ProvenanceRef`` per page the quote
+    touches, in page order. The gate verifies such a quote as the ordered join
+    of the per-page slices, so every character remains provably in the source
+    at the claimed place. Adding the tuple rather than widening
+    ``ProvenanceRef`` keeps the single-page invariant that the chunker's span
+    arithmetic and the demo's bbox overlay rely on.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["value"] = "value"
     value: str
     provenance: ProvenanceRef
+    multi_page_spans: tuple[ProvenanceRef, ...] | None = None
 
 
 class FieldAbstention(BaseModel):
