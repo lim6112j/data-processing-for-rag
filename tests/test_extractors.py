@@ -18,6 +18,7 @@ from rag_ingest.ontology import (
     FieldAbstention,
     FieldValue,
     InvoiceHeader,
+    LineItem,
     Unclassified,
 )
 
@@ -301,3 +302,74 @@ class TestDamagedValuesAreNotAbsent:
 
         assert result.status is GroundingStatus.INCOMPLETE
         assert not result.verified
+
+
+class TestLineItemCollection:
+    """survey.md conclusion 1: reconciliation needs rows to reconcile.
+
+    Deliberately narrow: only an explicitly labelled line amount (a number
+    beside a "line"/"item"/"subtotal"-style label, or inside a table row) is
+    collected. Every currency-marked number in the chunk is NOT a line item --
+    collecting those would reconcile the total against itself.
+    """
+
+    def _lines(self, text: str) -> tuple:
+        _, chunk = _chunk(text)
+        extraction = TemplateExtractor().extract(chunk)
+        return extraction.line_items
+
+    def test_labelled_lines_are_collected_with_spans(self):
+        lines = self._lines(
+            "Invoice INV-2041\n"
+            "Line 1: Widget 100.00 KRW\n"
+            "Line 2: Sprocket 200.00 KRW\n"
+            "Total 300.00 KRW"
+        )
+
+        assert len(lines) == 2
+        assert all(isinstance(line, LineItem) for line in lines)
+        assert all(isinstance(line.amount, FieldValue) for line in lines)
+
+    def test_collected_line_amounts_ground_against_the_source(self):
+        # The whole point of GroundedField: a line amount without a resolvable
+        # span is worthless. Verify the spans actually resolve.
+        text = (
+            "Invoice INV-2041\n"
+            "Line 1: Widget 100.00 KRW\n"
+            "Line 2: Sprocket 200.00 KRW\n"
+            "Total 300.00 KRW"
+        )
+        raw, chunk = _chunk(text)
+        extraction = TemplateExtractor().extract(chunk)
+
+        for line in extraction.line_items:
+            span_text = raw.span_text(line.amount.provenance)
+            assert span_text is not None
+            assert "100" in span_text or "200" in span_text
+
+    def test_the_total_itself_is_not_collected_as_a_line(self):
+        lines = self._lines(
+            "Invoice INV-2041\nLine 1: Widget 100.00 KRW\nTotal 300.00 KRW"
+        )
+
+        assert len(lines) == 1
+        assert lines[0].amount.value == "100.00"
+
+    def test_no_labelled_lines_yields_empty_tuple(self):
+        _, chunk = _chunk("Invoice INV-2041 total 1234.56 KRW")
+
+        extraction = TemplateExtractor().extract(chunk)
+
+        assert extraction.line_items == ()
+
+    def test_damaged_line_is_collected_as_illegible_abstention(self):
+        # Mark, never repair applies to rows too: the row exists, the amount
+        # is unreadable, and saying NOT_PRESENT would hide a reconciliation
+        # gap inside a clean-looking record.
+        lines = self._lines(
+            "Invoice INV-2041\nLine 1: Widget l,234.56 KRW\nTotal 1234.56 KRW"
+        )
+
+        assert len(lines) == 1
+        assert isinstance(lines[0].amount, FieldAbstention)
+        assert lines[0].amount.reason is AbstainReason.ILLEGIBLE

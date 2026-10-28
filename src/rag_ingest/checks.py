@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, ConfigDict
 
@@ -148,6 +149,73 @@ def _check_date_plausibility(
     return None
 
 
+def _parse_amount(raw: str) -> Decimal | None:
+    """Parse an amount, or None when the value does not claim to be one.
+
+    Same discipline as the gate's ``_numeric_key``: separators and currency
+    symbols are format, not damage; anything else is silence. A damaged line
+    (``l,234.56``) yields None, which silences reconciliation rather than
+    pretending the sum is known.
+    """
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    for symbol in "₩$€£¥":
+        candidate = candidate.replace(symbol, "")
+    candidate = candidate.replace(",", "").replace(" ", "")
+    try:
+        return Decimal(candidate)
+    except InvalidOperation:
+        return None
+
+
+#: Tolerance for reconciliation, in units of the smallest digit present.
+#: One cent/jeon: OCR can drop a trailing zero, but a mismatch larger than a
+#: rounding unit is a finding, not formatting. Decimal avoids the float drift
+#: that would turn 0.1+0.2 into a false alarm.
+RECONCILIATION_TOLERANCE = Decimal("0.01")
+
+
+def _check_arithmetic_reconciliation(
+    extraction: InvoiceHeader,
+) -> CheckFailure | None:
+    """Line items must sum to the total -- but only when all of them parse.
+
+    The check fires only on complete evidence: one unparseable line silences
+    it, because summing a subset and calling the mismatch a finding would
+    quarantine every invoice with a single damaged line. Silence here is the
+    correct outcome; grounding has already marked the damaged text.
+    """
+    if not extraction.line_items:
+        return None
+    if not isinstance(extraction.total_amount, FieldValue):
+        return None
+    total = _parse_amount(extraction.total_amount.value)
+    if total is None:
+        return None
+
+    parsed_lines: list[Decimal] = []
+    for item in extraction.line_items:
+        if not isinstance(item.amount, FieldValue):
+            return None
+        amount = _parse_amount(item.amount.value)
+        if amount is None:
+            return None  # incomplete evidence: the sum is unknown
+        parsed_lines.append(amount)
+
+    line_sum = sum(parsed_lines, Decimal(0))
+    if abs(line_sum - total) <= RECONCILIATION_TOLERANCE:
+        return None
+    return CheckFailure(
+        field="total_amount",
+        check_name="arithmetic_reconciliation",
+        message=(
+            f"line items sum to {line_sum} but the total claims "
+            f"{total} (tolerance {RECONCILIATION_TOLERANCE})"
+        ),
+    )
+
+
 def check_extraction(extraction: Extraction) -> tuple[CheckFailure, ...]:
     """Every deterministic check that disagrees with this extraction.
 
@@ -155,6 +223,10 @@ def check_extraction(extraction: Extraction) -> tuple[CheckFailure, ...]:
     means for admission. Runs after grounding, on gate-admitted extractions.
     """
     failures: list[CheckFailure] = []
+    if isinstance(extraction, InvoiceHeader):
+        arithmetic = _check_arithmetic_reconciliation(extraction)
+        if arithmetic is not None:
+            failures.append(arithmetic)
     for observation in _observations(extraction):
         failure = _check_date_plausibility(observation)
         if failure is not None:

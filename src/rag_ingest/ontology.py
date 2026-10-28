@@ -21,7 +21,7 @@ from rag_ingest.docmodel import ProvenanceRef
 
 #: Stamped on every chunk. Schemas will change; mixed vintages degrade
 #: retrieval silently, so the vintage must be recorded.
-ONTOLOGY_VERSION = "1.0.0"
+ONTOLOGY_VERSION = "1.1.0"
 
 #: Stamped on every chunk. Parsers change and documents will be re-ingested.
 PIPELINE_VERSION = "0.1.0"
@@ -103,6 +103,22 @@ GroundedField = Annotated[
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
+class LineItem(BaseModel):
+    """One reconcilable row of an invoice.
+
+    Exists for the arithmetic reconciliation check (``checks.py``): a total that
+    contradicts its own line items is the canonical error grounding cannot see
+    -- both numbers are verbatim in the source. The amount is a GroundedField
+    for the same reason every other value is: without a span the check cannot
+    run and the row should not exist.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    amount: GroundedField
+    description: GroundedField | None = None
+
+
 class InvoiceHeader(BaseModel):
     """Shape 1: a document header block with an identifier, date and total."""
 
@@ -113,6 +129,10 @@ class InvoiceHeader(BaseModel):
     issue_date: GroundedField
     total_amount: GroundedField
     currency: GroundedField
+    #: Reconcilable rows, when the extractor found labelled ones. Default empty
+    #: so existing producers stay valid; reconciliation only fires when the
+    #: check can see complete rows, so an empty tuple is "unknown", not "zero".
+    line_items: tuple[LineItem, ...] = ()
 
 
 class ReportSection(BaseModel):
@@ -208,6 +228,7 @@ __all__ = [
     "GateTier",
     "GroundedField",
     "InvoiceHeader",
+    "LineItem",
     "ProseKnowledge",
     "ReportSection",
     "Unclassified",

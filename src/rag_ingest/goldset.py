@@ -23,6 +23,7 @@ from rag_ingest.ontology import (
     FieldAbstention,
     FieldValue,
     InvoiceHeader,
+    LineItem,
     Unclassified,
 )
 
@@ -159,11 +160,20 @@ class GoldExtractor:
                 return FieldValue(value=str(claim[name]), provenance=ref)
             return FieldAbstention(reason=AbstainReason.NOT_PRESENT)
 
+        # Line items come from the claim's ``line_items`` list, each grounded
+        # against the whole page -- the same convention as the scalar fields.
+        raw_lines = claim.get("line_items") or ()
+        lines = tuple(
+            LineItem(amount=FieldValue(value=str(amount), provenance=ref))
+            for amount in raw_lines
+        )
+
         return InvoiceHeader(
             invoice_number=field("invoice_number"),
             issue_date=field("issue_date"),
             total_amount=field("total_amount"),
             currency=field("currency"),
+            line_items=lines,
         )
 
 

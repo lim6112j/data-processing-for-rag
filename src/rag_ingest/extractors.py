@@ -33,6 +33,7 @@ from rag_ingest.ontology import (
     FieldAbstention,
     FieldValue,
     InvoiceHeader,
+    LineItem,
     ProseKnowledge,
     Unclassified,
 )
@@ -55,6 +56,19 @@ _LABELLED_AMOUNT = re.compile(
 )
 
 _DATE = re.compile(r"\b(?P<date>\d{4}-\d{2}-\d{2})\b")
+
+#: An explicitly labelled line row: "Line 1:", "Item 2:", "1." before a
+#: currency-marked amount. Deliberately narrow -- collecting every
+#: currency-marked number would reconcile the total against itself, since the
+#: total itself is a currency-marked number. Only a row label makes a number
+#: a line item, and the damaged-amount alternative keeps a damaged ROW visible
+#: as ILLEGIBLE rather than disappearing into a clean-looking record.
+_LINE_ROW = re.compile(
+    r"(?im)^\s*(?:line|item|품목)\s*\d+\s*[:\-]\s*.*?"
+    r"(?P<currency>[₩$€£¥])?\s*"
+    r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d{2})"
+    r"\s?(?P<currency2>[₩$€£¥])?",
+)
 
 #: Something that looks like it *wants* to be an amount but is damaged -- e.g.
 #: OCR read a lowercase L for the leading 1 ("l,234.56"). Detecting this is what
@@ -139,9 +153,43 @@ class TemplateExtractor(BaseModel):
             issue_date=issue_date,
             total_amount=amount,
             currency=currency,
+            line_items=self._line_items(chunk),
         )
 
     # -- field helpers ----------------------------------------------------
+
+    def _line_items(self, chunk: Chunk) -> tuple[LineItem, ...]:
+        """Explicitly labelled line rows, spans resolvable or row dropped.
+
+        A row whose amount cannot be anchored to the page buffer is worthless
+        for reconciliation, so it is skipped entirely rather than carried with
+        a fabricated span -- same rule as every other field here. Damaged but
+        anchored amounts become ILLEGIBLE abstentions so the gap stays
+        visible.
+        """
+        items: list[LineItem] = []
+        for match in _LINE_ROW.finditer(chunk.text):
+            amount = self._line_amount(match, chunk)
+            if amount is None:
+                continue
+            items.append(LineItem(amount=amount))
+        return tuple(items)
+
+    def _line_amount(self, match, chunk: Chunk):
+        num = match.group("num")
+        # The amount portion must not begin mid-number: "l,234.56" leaves
+        # "234.56" for the regex, which would read a damaged row as a clean
+        # 234.56 and poison reconciliation. Two characters of look-behind is
+        # the minimum the damage pattern needs ([lIO|] + separator); a
+        # damaged-amount hit in that window means the row exists but its
+        # amount is unreadable.
+        look_behind = match.group(0)[max(0, match.start("num") - match.start(0) - 2) :]
+        if num is None or _DAMAGED_AMOUNT.search(look_behind):
+            return FieldAbstention(reason=AbstainReason.ILLEGIBLE)
+        span = chunk.span_for(match.start("num"), match.end("num"))
+        if span is None:
+            return None
+        return FieldValue(value=num, provenance=span)
 
     def _identifier(self, chunk: Chunk):
         pattern = _IDENTIFIER

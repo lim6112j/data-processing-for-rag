@@ -133,7 +133,6 @@ cases:
       quarantined: 0
       reason: null
       defects: [suspected_ocr_damage]
-
   - id: impossible-date-is-quarantined
     description: >
       The date 2026-13-45 is verbatim in the source, so grounding passes it --
@@ -159,3 +158,55 @@ cases:
       verified: 0
       quarantined: 1
       reason: consistency_failed
+
+  - id: lines-that-disagree-with-total-are-quarantined
+    description: >
+      survey.md conclusion 1, ranked first: line items vs total. Both numbers
+      are verbatim in the source, so grounding passes both -- the gate checks
+      presence, not consistency. The document contradicts itself (the total
+      was keyed wrong at creation, then OCR read it faithfully); 100 + 200 !=
+      999.99 only a deterministic arithmetic reconciliation can refuse. The
+      chunk quarantines with a specific question naming the numbers, because
+      a reviewer can fix a stated contradiction but not a vague doubt.
+    class: invoice
+    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
+    pages:
+      - |
+        INVOICE
+        Invoice INV-2045
+        Line 1: Widget 100.00 KRW
+        Line 2: Sprocket 200.00 KRW
+        Total 999.99 KRW
+    extractor_claim:
+      invoice_number: "INV-2045"
+      total_amount: "999.99"
+      currency: "KRW"
+      line_items: ["100.00", "200.00"]
+    expected:
+      verified: 0
+      quarantined: 1
+      reason: consistency_failed
+
+  - id: lines-that-reconcile-still-verify
+    description: >
+      The control for the case above: identical shape, but the total agrees
+      with its lines. Reconciliation must not become over-detection -- the
+      documented failure mode for any new data-quality check (survey.md 6.1).
+    class: invoice
+    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
+    pages:
+      - |
+        INVOICE
+        Invoice INV-2046
+        Line 1: Widget 100.00 KRW
+        Line 2: Sprocket 200.00 KRW
+        Total 300.00 KRW
+    extractor_claim:
+      invoice_number: "INV-2046"
+      total_amount: "300.00"
+      currency: "KRW"
+      line_items: ["100.00", "200.00"]
+    expected:
+      verified: 1
+      quarantined: 0
+      reason: null
