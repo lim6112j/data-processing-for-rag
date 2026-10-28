@@ -200,3 +200,186 @@ class TestContractDrivenGate:
 
         with pytest.raises(KeyError):
             gate.check_contract("unknown_shape", claimed)
+
+
+class TestConstraintCompilation:
+    """Declared constraints become deterministic checks -- no per-shape code.
+
+    This is the piece that makes torque tables safe: min <= max is a
+    declaration on the contract, and the gate compiles it. Before this, a
+    wrong range (max < min) passed grounding (both numbers are verbatim) and
+    entered the database silently.
+    """
+
+    def _claim(self, values: dict[str, str | None]) -> dict:
+        ref = ProvenanceRef(page=1, char_start=0, char_end=60, element_id="e")
+        return {
+            name: (FieldValue(value=v, provenance=ref) if v is not None else _abstain())
+            for name, v in values.items()
+        }
+
+    def _gate_for(self, contract: ShapeContract):
+        from rag_ingest.grounding import GroundingGate, GroundingStatus
+
+        elements = [
+            Element(
+                element_id="e1",
+                kind=ElementKind.PARAGRAPH,
+                page=1,
+                text="1/4-28  70-50  Coarse",
+            )
+        ]
+        raw, _ = RawDocument.from_elements("d", elements)
+        return GroundingGate(raw, shapes=ShapeRegistry.with_builtins()), GroundingStatus
+
+    def _register(self, contract: ShapeContract):
+        registry = ShapeRegistry.with_builtins()
+        registry.register(contract)
+        return registry
+
+    def test_min_ref_violation_is_mismatch(self):
+        # The document verbatim says "70-50" -- grounding passes both numbers.
+        # Only the declared max>=min constraint can see the contradiction.
+        contract = ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(
+                    name="torque_max", kind="number", required=True, min_ref="torque_min"
+                ),
+            ),
+        )
+        registry = self._register(contract)
+        from rag_ingest.grounding import GroundingGate, GroundingStatus
+
+        elements = [
+            Element(
+                element_id="e1",
+                kind=ElementKind.PARAGRAPH,
+                page=1,
+                text="1/4-28  70-50  Coarse",
+            )
+        ]
+        raw, _ = RawDocument.from_elements("d", elements)
+        gate = GroundingGate(raw, shapes=registry)
+        ref = ProvenanceRef(page=1, char_start=0, char_end=len(raw.pages[0].text), element_id="e1")
+
+        result = gate.check_contract(
+            "torque_spec",
+            {
+                "thread_size": FieldValue(value="1/4-28", provenance=ref),
+                "torque_min": FieldValue(value="70", provenance=ref),
+                "torque_max": FieldValue(value="50", provenance=ref),
+            },
+        )
+
+        assert result.status is GroundingStatus.MISMATCH
+        bad = [i for i in result.issues if i.status is GroundingStatus.MISMATCH]
+        assert bad[0].field == "torque_max"
+        assert "torque_min" in bad[0].message
+
+    def test_ge_constraint_is_enforced(self):
+        contract = ShapeContract(
+            name="pressure",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="psi", kind="number", required=True, ge=0),
+            ),
+        )
+        registry = self._register(contract)
+        from rag_ingest.grounding import GroundingGate, GroundingStatus
+
+        elements = [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text="psi -5")]
+        raw, _ = RawDocument.from_elements("d", elements)
+        gate = GroundingGate(raw, shapes=registry)
+        ref = ProvenanceRef(page=1, char_start=0, char_end=len(raw.pages[0].text), element_id="e1")
+
+        result = gate.check_contract(
+            "pressure", {"psi": FieldValue(value="-5", provenance=ref)}
+        )
+
+        assert result.status is GroundingStatus.MISMATCH
+
+    def test_enum_violation_is_mismatch(self):
+        registry = self._register(TORQUE_CONTRACT)
+        from rag_ingest.grounding import GroundingGate, GroundingStatus
+
+        elements = [
+            Element(
+                element_id="e1", kind=ElementKind.PARAGRAPH, page=1,
+                text="1/4-28 50-70 Medium",
+            )
+        ]
+        raw, _ = RawDocument.from_elements("d", elements)
+        gate = GroundingGate(raw, shapes=registry)
+        ref = ProvenanceRef(page=1, char_start=0, char_end=len(raw.pages[0].text), element_id="e1")
+
+        result = gate.check_contract(
+            "torque_spec",
+            {
+                "thread_size": FieldValue(value="1/4-28", provenance=ref),
+                "torque_min": FieldValue(value="50", provenance=ref),
+                "torque_max": FieldValue(value="70", provenance=ref),
+                "series": FieldValue(value="Medium", provenance=ref),
+            },
+        )
+
+        assert result.status is GroundingStatus.MISMATCH
+        bad = [i for i in result.issues if i.status is GroundingStatus.MISMATCH]
+        assert bad[0].field == "series"
+
+    def test_satisfied_constraints_still_verify(self):
+        registry = self._register(TORQUE_CONTRACT)
+        from rag_ingest.grounding import GroundingGate
+
+        elements = [
+            Element(
+                element_id="e1", kind=ElementKind.PARAGRAPH, page=1,
+                text="1/4-28 50-70 Coarse",
+            )
+        ]
+        raw, _ = RawDocument.from_elements("d", elements)
+        gate = GroundingGate(raw, shapes=registry)
+        ref = ProvenanceRef(page=1, char_start=0, char_end=len(raw.pages[0].text), element_id="e1")
+
+        result = gate.check_contract(
+            "torque_spec",
+            {
+                "thread_size": FieldValue(value="1/4-28", provenance=ref),
+                "torque_min": FieldValue(value="50", provenance=ref),
+                "torque_max": FieldValue(value="70", provenance=ref),
+                "series": FieldValue(value="Coarse", provenance=ref),
+            },
+        )
+
+        assert result.verified
+
+    def test_unparseable_number_is_unverifiable_not_passed(self):
+        # A number field whose value cannot parse ("TBD") must not slip
+        # through the numeric constraints by failing to parse -- silence is
+        # for abstentions, not for unparseable claimed values.
+        contract = ShapeContract(
+            name="pressure",
+            tier=GateTier.STRICT,
+            fields=(FieldSpec(name="psi", kind="number", required=True, ge=0),),
+        )
+        registry = self._register(contract)
+        from rag_ingest.grounding import GroundingGate, GroundingStatus
+
+        elements = [
+            Element(
+                element_id="e1", kind=ElementKind.PARAGRAPH, page=1,
+                text="psi is fine",
+            )
+        ]
+        raw, _ = RawDocument.from_elements("d", elements)
+        gate = GroundingGate(raw, shapes=registry)
+        ref = ProvenanceRef(page=1, char_start=0, char_end=len(raw.pages[0].text), element_id="e1")
+
+        result = gate.check_contract(
+            "pressure", {"psi": FieldValue(value="fine", provenance=ref)}
+        )
+
+        assert result.status is GroundingStatus.UNVERIFIABLE

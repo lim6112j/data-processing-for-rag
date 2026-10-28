@@ -365,6 +365,71 @@ class GroundingGate:
             )
         if abstained == len(contract.fields):
             return GroundingResult(status=GroundingStatus.ABSTAINED, issues=tuple(issues))
+
+        # Declared constraints, compiled per field. Span re-derivation proves
+        # the value is IN the source; these prove the values agree with what
+        # the owner declared they mean. A number field that cannot parse is
+        # UNVERIFIABLE, not silent -- silence is for honest abstentions.
+        from decimal import Decimal
+
+
+        claimed_values: dict[str, str] = {}
+        for spec in contract.fields:
+            field = claimed.get(spec.name)
+            if not isinstance(field, FieldValue):
+                continue
+            if spec.kind == "number":
+                candidate = _numeric_key(field.value)
+                if candidate is None:
+                    issues.append(
+                        Issue(
+                            field=spec.name,
+                            status=GroundingStatus.UNVERIFIABLE,
+                            message=f"claimed value {field.value!r} is not a number",
+                        )
+                    )
+                    continue
+                claimed_values[spec.name] = field.value
+                if spec.ge is not None and candidate < Decimal(str(spec.ge)):
+                    issues.append(
+                        Issue(
+                            field=spec.name,
+                            status=GroundingStatus.MISMATCH,
+                            message=f"{field.value} is below the declared minimum {spec.ge}",
+                        )
+                    )
+            else:
+                claimed_values[spec.name] = field.value
+
+        for spec in contract.fields:
+            if spec.min_ref is None or spec.name not in claimed_values:
+                continue
+            ref_value = claimed_values.get(spec.min_ref)
+            if ref_value is None:
+                continue
+            mine = _numeric_key(claimed_values[spec.name])
+            theirs = _numeric_key(ref_value)
+            if mine is None or theirs is None:
+                continue
+            if mine < theirs:
+                issues.append(
+                    Issue(
+                        field=spec.name,
+                        status=GroundingStatus.MISMATCH,
+                        message=(
+                            f"{spec.name} ({claimed_values[spec.name]}) is below "
+                            f"{spec.min_ref} ({ref_value})"
+                        ),
+                    )
+                )
+
+        if any(i.status is GroundingStatus.MISMATCH for i in issues):
+            return GroundingResult(status=GroundingStatus.MISMATCH, issues=tuple(issues))
+        if any(i.status is GroundingStatus.UNVERIFIABLE for i in issues):
+            return GroundingResult(
+                status=GroundingStatus.UNVERIFIABLE, issues=tuple(issues)
+            )
+
         # Two evidence bars, both must hold: the tier's minimum-field rule and
         # the contract's own required set. A required field missing is
         # INCOMPLETE even when enough optional fields were found -- the owner
@@ -379,6 +444,9 @@ class GroundingGate:
             )
         ]
         extracted = len(contract.fields) - abstained
+        unparseable = any(i.status is GroundingStatus.UNVERIFIABLE for i in issues)
+        if unparseable:
+            return GroundingResult(status=GroundingStatus.UNVERIFIABLE, issues=tuple(issues))
         if missing_required or extracted < MIN_FIELDS_BY_TIER[resolved_tier]:
             return GroundingResult(status=GroundingStatus.INCOMPLETE, issues=tuple(issues))
         return GroundingResult(status=GroundingStatus.GROUNDED, issues=tuple(issues))
