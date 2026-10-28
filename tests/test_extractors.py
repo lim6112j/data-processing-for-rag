@@ -163,6 +163,21 @@ class TestUnclassified:
         assert isinstance(extraction, Unclassified)
         assert extraction.observed_shape == "prose"
 
+    def test_a_multi_line_paragraph_is_not_reported_as_tabular(self):
+        # Newline count is not evidence of a table. On the FAA manual this
+        # heuristic labelled 746 of 754 chunks tabular, because almost every
+        # text chunk spans more than three lines.
+        _, chunk = _chunk(
+            "The castle nut should be inspected for cracks.\n"
+            "Replace any nut whose threads show damage.\n"
+            "Torque values are given in table 7-1."
+        )
+
+        extraction = TemplateExtractor().extract(chunk)
+
+        assert isinstance(extraction, Unclassified)
+        assert extraction.observed_shape == "prose"
+
     def test_unclassified_carries_a_resolvable_span(self):
         raw, chunk = _chunk("A haiku about procurement")
 
@@ -183,6 +198,64 @@ class TestUnclassified:
         blank = chunk.model_copy(update={"text": "   "})
 
         assert TemplateExtractor().extract(blank) is None
+
+
+class TestAnIdentifierAloneIsNotARecord:
+    """A part number is shaped exactly like an invoice number.
+
+    Measured on FAA AC 43.13-1B (see ``corpus/README.md``): ``_IDENTIFIER``
+    matched aviation hardware designations (AN310, MS20365, NAS1223) and every
+    one of them became an ``InvoiceHeader``. Grounding cannot reject those,
+    because the token *is* verbatim in the source -- it verifies presence, not
+    semantic role. So the corroboration has to happen here, before a record is
+    opened.
+    """
+
+    def test_part_number_alone_is_unclassified_not_an_invoice(self):
+        _, chunk = _chunk(
+            "7-66. CASTLE NUT (AN310). The castle nut should be inspected for cracks."
+        )
+
+        extraction = TemplateExtractor().extract(chunk)
+
+        assert isinstance(extraction, Unclassified)
+
+    def test_standard_reference_alone_is_unclassified(self):
+        _, chunk = _chunk("Fasteners shall conform to NAS1223-1235 and MS20365 as applicable.")
+
+        extraction = TemplateExtractor().extract(chunk)
+
+        assert isinstance(extraction, Unclassified)
+
+    def test_monetary_evidence_alone_corroborates_a_record(self):
+        # No "invoice" word, but an amount is monetary evidence; a part number
+        # never is. This is the discriminating signal.
+        _, chunk = _chunk("Total: 99.50 KRW")
+
+        extraction = TemplateExtractor().extract(chunk)
+
+        assert isinstance(extraction, InvoiceHeader)
+
+    def test_invoice_label_alone_still_opens_a_record(self):
+        # Required by test_missing_fields_abstain_rather_than_invent: a labelled
+        # header with an identifier but no parseable amount must still produce
+        # abstentions, not vanish into unclassified. The label is the evidence.
+        _, chunk = _chunk("Invoice pending, reference INV-2041")
+
+        extraction = TemplateExtractor().extract(chunk)
+
+        assert isinstance(extraction, InvoiceHeader)
+        assert isinstance(extraction.total_amount, FieldAbstention)
+
+    def test_part_number_beside_an_invoice_label_is_not_discarded(self):
+        # Corroboration must not be over-tightened: real invoice text may cite
+        # part numbers too, and the label is the decisive evidence.
+        _, chunk = _chunk("Invoice INV-2041 for part AN310 total $10.00")
+
+        extraction = TemplateExtractor().extract(chunk)
+
+        assert isinstance(extraction, InvoiceHeader)
+        assert extraction.invoice_number.value == "INV-2041"
 
 
 class TestCurrencies:

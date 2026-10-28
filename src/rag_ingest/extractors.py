@@ -25,7 +25,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from rag_ingest.chunking import Chunk
+from rag_ingest.chunking import Chunk, ChunkKind
 from rag_ingest.ontology import (
     AbstainReason,
     Extraction,
@@ -101,13 +101,33 @@ class TemplateExtractor(BaseModel):
         ):
             if not looked_like_invoice:
                 return Unclassified(
-                    observed_shape=_shape_hint(chunk.text),
+                    observed_shape=_shape_hint(chunk),
                     provenance=_whole_chunk_span(chunk),
                 )
             # It said "invoice" but nothing was parseable: genuinely unclassified,
             # and the review question should ask what the document should look like.
             return Unclassified(
                 observed_shape="invoice_header_unparseable",
+                provenance=_whole_chunk_span(chunk),
+            )
+
+        # Corroboration. An identifier alone does not open a record, because a
+        # part number is shaped exactly like an invoice number -- measured on FAA
+        # AC 43.13-1B, where ``_IDENTIFIER`` matched AN310/MS20365/NAS1223 and
+        # every one of them became an InvoiceHeader. Grounding cannot reject
+        # those: the token *is* verbatim in the source, so the gate sees no
+        # mismatch. It verifies presence, not semantic role, so the refusal has
+        # to happen here, before the record exists.
+        #
+        # Either kind of evidence is enough on its own: a monetary amount is
+        # evidence no hardware designation can supply, and an explicit invoice
+        # label is the strongest evidence of all. Requiring both would drop real
+        # invoice headers whose amount did not parse (see
+        # ``test_missing_fields_abstain_rather_than_invent``).
+        corroborated = isinstance(amount, FieldValue) or looked_like_invoice
+        if not corroborated:
+            return Unclassified(
+                observed_shape=_shape_hint(chunk),
                 provenance=_whole_chunk_span(chunk),
             )
 
@@ -200,12 +220,20 @@ def _whole_chunk_span(chunk: Chunk):
     return ProvenanceRef(page=chunk.page_start, char_start=0, char_end=1, bbox=chunk.bbox)
 
 
-def _shape_hint(text: str) -> str:
-    """A crude label for what a chunk looks like, for the review queue."""
-    stripped = text.strip()
+def _shape_hint(chunk: Chunk) -> str:
+    """A crude label for what a chunk looks like, for the review queue.
+
+    Table-ness comes from the chunker's own ``kind`` plus the pipe rendering a
+    table produces -- never from counting newlines. Counting newlines reported
+    any three-line paragraph as a table, which mislabelled 746 of 754 chunks on
+    the FAA manual (see ``corpus/README.md``) and corrupts the document-shape
+    metric that ``survey.md`` says decides whether a lenient tier is worth
+    building.
+    """
+    stripped = chunk.text.strip()
     if not stripped:
         return "empty"
-    if "|" in stripped or stripped.count("\n") > 2:
+    if chunk.kind is ChunkKind.TABLE or "|" in stripped:
         return "tabular"
     if len(stripped) < 40:
         return "heading_or_label"
