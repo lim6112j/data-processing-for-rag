@@ -133,3 +133,29 @@ cases:
       quarantined: 0
       reason: null
       defects: [suspected_ocr_damage]
+
+  - id: impossible-date-is-quarantined
+    description: >
+      The date 2026-13-45 is verbatim in the source, so grounding passes it --
+      the string IS where it claims to be. Only a deterministic semantic check
+      can see that those digits cannot mean a day. survey.md conclusion 1: the
+      gate verifies "in the source", not "means something". A check failure
+      quarantines as schema_mismatch, because an impossible date in retrieval
+      is a confident wrong answer with a citation attached.
+    class: invoice
+    scores: { ocr: 0.96, layout: 0.94, parse: 0.95 }
+    pages:
+      - |
+        INVOICE
+        Invoice INV-2044
+        Issued 2026-13-45
+        Total 1,234.56 KRW
+    extractor_claim:
+      invoice_number: "INV-2044"
+      issue_date: "2026-13-45"
+      total_amount: "1234.56"
+      currency: "KRW"
+    expected:
+      verified: 0
+      quarantined: 1
+      reason: schema_mismatch

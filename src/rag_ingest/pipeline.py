@@ -22,6 +22,7 @@ from rag_ingest.adjudication import (
     build_question,
 )
 from rag_ingest.candidates import CandidateProducer, NullProducer, describe_disagreement
+from rag_ingest.checks import CheckFailure, check_extraction
 from rag_ingest.chunking import Chunk, Chunker
 from rag_ingest.defects import scan_defects
 from rag_ingest.docmodel import Element, ProvenanceRef, RawDocument
@@ -150,6 +151,20 @@ class IngestPipeline:
             record = _to_record(chunk, extraction, result, tier)
 
             if result is not None and result.verified:
+                # Deterministic semantic checks run AFTER the gate, only on
+                # what the gate admitted: a value must be provably in the
+                # source before asking whether it is plausible. A failure here
+                # is a quarantine, not a note -- an impossible date in
+                # retrieval is a confident wrong answer with a citation.
+                failures = check_extraction(extraction) if extraction else ()
+                if failures:
+                    quarantined.append(record)
+                    item = self._check_failure_item(
+                        chunk=chunk, failures=failures, owner_id=owner_id
+                    )
+                    self._queue.enqueue(item)
+                    review_items.append(item)
+                    continue
                 verified.append(record)
                 continue
 
@@ -254,6 +269,38 @@ class IngestPipeline:
             owner_id=owner_id,
             created_on=self._today,
             retrieval_demand=retrieval_demand,
+        )
+
+    def _check_failure_item(
+        self,
+        *,
+        chunk: Chunk,
+        failures: tuple[CheckFailure, ...],
+        owner_id: str,
+    ) -> ReviewItem:
+        """Review item for a deterministic semantic check failure.
+
+        The grounding gate passed this chunk, so the question is not "where did
+        this come from" (answered) but "can these values be true together" --
+        a different question, and the question must say exactly which check
+        disagreed, because the reviewer will look straight at that value.
+        """
+        detail = "; ".join(f.message for f in failures)
+        fields = ", ".join(sorted({f.field for f in failures}))
+        where = f" under '{chunk.heading_path}'" if chunk.heading_path.titles else ""
+        return ReviewItem(
+            item_id=f"{chunk.doc_id}:{chunk.chunk_id}",
+            doc_id=chunk.doc_id,
+            chunk_id=chunk.chunk_id,
+            reason=EscalationReason.SCHEMA_MISMATCH,
+            issues=(),
+            question=(
+                f"The {fields} value{'' if len(failures) == 1 else 's'} failed a "
+                f"consistency check{where}: {detail}. What should it be?"
+            ),
+            owner_id=owner_id,
+            created_on=self._today,
+            retrieval_demand=0,
         )
 
     def _grounding_verdict(

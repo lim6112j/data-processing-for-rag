@@ -45,6 +45,13 @@ class StubExtractor:
                 total_amount=FieldValue(value="1234.56", provenance=ref),
                 currency=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
             )
+        if template == "invoice_impossible_date":
+            return InvoiceHeader(
+                invoice_number=FieldValue(value="INV-9", provenance=ref),
+                issue_date=FieldValue(value="2026-13-45", provenance=ref),
+                total_amount=FieldValue(value="1234.56", provenance=ref),
+                currency=FieldAbstention(reason=AbstainReason.NOT_PRESENT),
+            )
         if template == "invoice_damaged_but_readable":
             return InvoiceHeader(
                 invoice_number=FieldValue(value="INV-9", provenance=ref),
@@ -260,6 +267,73 @@ class TestUnclassifiedScope:
 
         reasons = {item.reason for item in outcome.review_items}
         assert EscalationReason.SCHEMA_MISMATCH not in reasons
+
+
+class TestSemanticChecks:
+    """survey.md conclusion 1: grounding sees "in the source", not "means a
+
+    real date". 2026-13-45 is verbatim in the span, so the gate passes it;
+    only a deterministic semantic check can refuse it. The check runs AFTER
+    the gate, and its failure quarantines -- an impossible date in retrieval
+    is exactly the confident wrong answer this pipeline exists to prevent.
+    """
+
+    def _ingest_impossible_date(self):
+        elements = [
+            heading("Invoices", level=1, element_id="h-inv"),
+            # The date is verbatim in the source -- grounding passes it.
+            paragraph("Invoice INV-9 dated 2026-13-45 total 1234.56", element_id="p-inv"),
+        ]
+        raw, doc_elements = RawDocument.from_elements("d1", elements)
+        ref = ProvenanceRef(
+            page=1,
+            char_start=raw.pages[0].text.index("Invoice INV-9"),
+            char_end=(
+                raw.pages[0].text.index("Invoice INV-9")
+                + len("Invoice INV-9 dated 2026-13-45 total 1234.56")
+            ),
+        )
+        extractor = StubExtractor(
+            {"Invoices": "invoice_impossible_date"}, {"Invoices": ref}
+        )
+        queue = ReviewQueue()
+        outcome = IngestPipeline(queue, extractor, today=TODAY).ingest(
+            raw, doc_elements, owner_id="owner-1"
+        )
+        return outcome, queue
+
+    def test_impossible_date_is_quarantined_despite_clean_grounding(self):
+        outcome, _ = self._ingest_impossible_date()
+
+        assert outcome.verified_chunks == ()
+        assert len(outcome.quarantined_chunks) == 1
+
+    def test_check_failure_is_a_specific_review_reason(self):
+        outcome, _ = self._ingest_impossible_date()
+
+        assert outcome.review_items
+        item = outcome.review_items[0]
+        assert item.reason is EscalationReason.SCHEMA_MISMATCH
+        # The question must say what is wrong, not just that something is.
+        assert "2026-13-45" in item.question
+
+    def test_valid_dates_still_verify(self):
+        raw, elements = _build_doc()
+        ref = ProvenanceRef(
+            page=1,
+            char_start=raw.pages[0].text.index("Invoice INV-9"),
+            char_end=(
+                raw.pages[0].text.index("Invoice INV-9")
+                + len("Invoice INV-9 total 1234.56 KRW")
+            ),
+        )
+        extractor = StubExtractor({"Invoices": "invoice_ok"}, {"Invoices": ref})
+
+        outcome = IngestPipeline(ReviewQueue(), extractor, today=TODAY).ingest(
+            raw, elements, owner_id="owner-1"
+        )
+
+        assert len(outcome.verified_chunks) == 1
 
 
 class TestTierGating:
