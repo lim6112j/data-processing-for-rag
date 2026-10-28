@@ -313,7 +313,7 @@ class TestSemanticChecks:
 
         assert outcome.review_items
         item = outcome.review_items[0]
-        assert item.reason is EscalationReason.SCHEMA_MISMATCH
+        assert item.reason is EscalationReason.CONSISTENCY_FAILED
         # The question must say what is wrong, not just that something is.
         assert "2026-13-45" in item.question
 

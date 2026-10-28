@@ -292,7 +292,7 @@ class IngestPipeline:
             item_id=f"{chunk.doc_id}:{chunk.chunk_id}",
             doc_id=chunk.doc_id,
             chunk_id=chunk.chunk_id,
-            reason=EscalationReason.SCHEMA_MISMATCH,
+            reason=EscalationReason.CONSISTENCY_FAILED,
             issues=(),
             question=(
                 f"The {fields} value{'' if len(failures) == 1 else 's'} failed a "

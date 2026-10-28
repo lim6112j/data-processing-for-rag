@@ -158,4 +158,4 @@ cases:
     expected:
       verified: 0
       quarantined: 1
-      reason: schema_mismatch
+      reason: consistency_failed

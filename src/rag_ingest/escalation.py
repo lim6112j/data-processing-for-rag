@@ -34,6 +34,12 @@ class EscalationReason(StrEnum):
     UNCLASSIFIED = "unclassified"
     #: The value was claimed but is not present in the source it cites.
     UNGROUNDED = "ungrounded"
+    #: A deterministic consistency check disagreed with a grounded value
+    #: (``checks.py``). Not schema-shaped: an impossible date is almost always
+    #: OCR-damaged or misparsed digits, a parser problem like UNGROUNDED, not
+    #: a signal that the ontology type is wrong. Deliberately excluded from
+    #: the ``suspect_ontology`` classification in ``metrics``.
+    CONSISTENCY_FAILED = "consistency_failed"
 
 
 class ReviewerRole(StrEnum):
