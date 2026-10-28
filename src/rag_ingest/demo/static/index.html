@@ -408,7 +408,10 @@ async function proposeShape(shape) {
     `<div class="mono" style="font-size:11px">sample: ${esc(e.sample_value)} <span class="muted">(row ${e.row_index})</span></div>`).join('');
   host.insertAdjacentHTML('beforeend', `
     <div class="card">
-      <div style="font-weight:600;margin-bottom:6px">Proposed shape: ${esc(proposal.shape_name)} (${esc(proposal.tier_declared)})</div>
+      <div style="font-weight:600;margin-bottom:6px">Proposed shape: ${esc(proposal.shape_name)} (${esc(proposal.tier_declared)})
+        <span class="pill ${proposal.source === 'llm' ? 'warn' : 'ok'}" style="margin-left:8px">${proposal.source === 'llm' ? 'LLM claim' : 'grammar'}</span>
+      </div>
+      ${proposal.source === 'llm' ? '<div class="meta" style="margin-bottom:6px">A model proposed this schema — every claim below was verified against the sample rows, and the adoption gate will re-verify it before registration.</div>' : ''}
       <table style="margin-bottom:8px"><tbody>${fieldRows}</tbody></table>
       <div class="meta" style="margin-bottom:4px">Evidence — each field was seen at these values in the source:</div>
       ${evidenceRows}

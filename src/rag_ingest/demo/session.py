@@ -113,6 +113,10 @@ class DemoSession:
     adjudicator: object | None = None
     producer: object | None = None
     today: date = field(default_factory=date.today)
+    #: Optional LLM proposer client (OpenRouter-style). When set, clusters the
+    #: grammar proposer refuses fall back to the model -- whose claims are
+    #: labelled source="llm" and still pass through the adoption gate.
+    llm_proposer: object | None = None
 
     #: Demo-only: force every chunk down the structure-ambiguous route.
     #:
@@ -313,7 +317,10 @@ class DemoSession:
             ][:5]
             if not rows:
                 return None
-            return build_proposal(shape, tuple(rows), shape_name=f"{shape}_spec")
+            proposal = build_proposal(shape, tuple(rows), shape_name=f"{shape}_spec")
+            if proposal.parseable or self.llm_proposer is None:
+                return proposal if proposal.parseable else None
+            return self._llm_fallback(shape, tuple(rows))
         for outcome in self.outcomes.values():
             for record in outcome.quarantined_chunks:
                 extraction = record.extraction
@@ -327,7 +334,25 @@ class DemoSession:
                         rows.append(cells)
         if not rows:
             return None
-        return build_proposal(shape, tuple(rows[:5]), shape_name=f"{shape}_spec")
+        proposal = build_proposal(shape, tuple(rows[:5]), shape_name=f"{shape}_spec")
+        if proposal.parseable or self.llm_proposer is None:
+            return proposal if proposal.parseable else None
+        return self._llm_fallback(shape, tuple(rows[:5]))
+
+    def _llm_fallback(self, shape: str, rows: tuple[tuple[str, ...], ...]):
+        """Ask the model for a claim the grammar could not make.
+
+        The fallback fires only after the grammar refused. A refusal from the
+        model is still a refusal: the caller sees None, never a guessed
+        schema. This method exists so the owner's conversation can continue
+        for clusters the regexes cannot classify -- with the label that says
+        a model, not a grammar, proposed it.
+        """
+        from rag_ingest.llm_propose import LlmProposer
+
+        proposer = LlmProposer(client=self.llm_proposer)
+        proposal = proposer.propose(shape, rows)
+        return proposal if proposal.parseable else None
 
     def registry(self):
         """The runtime shape registry: built-ins plus anything adopted."""

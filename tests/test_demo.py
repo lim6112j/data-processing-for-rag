@@ -1178,3 +1178,100 @@ class TestRowDiscoveryInSession:
         assert proposal.parseable
         names = [f.name for f in proposal.fields]
         assert "thread_size" in names or any("min" in n for n in names)
+
+
+class TestLlmProposerFallback:
+    """When the grammar proposer refuses a cluster, the session may fall
+    back to the LLM proposer -- and the UI must see who proposed what."""
+
+    def _session_with_llm(self, llm_proposal):
+        import json
+        from types import SimpleNamespace
+
+        from rag_ingest.demo.session import DemoSession
+
+        class _FakeCompletions:
+            def __init__(self, payload):
+                self._payload = payload
+                self.calls = []
+
+            def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=self._payload)
+                    )]
+                )
+
+        class _FakeClient:
+            def __init__(self, payload):
+                self.chat = SimpleNamespace(completions=_FakeCompletions(payload))
+
+        session = DemoSession(today=TODAY, llm_proposer=_FakeClient(json.dumps(llm_proposal)))
+        return session
+
+    def _ingest_all_text_table(self, session):
+        # A table the grammar cannot parse: every data cell is free text,
+        # so the grammar proposer refuses it as prose.
+        rows = (
+            ("부품코드", "상태", "메모"),
+            ("AN310-4", "PASS", "정상"),
+            ("MS20365-3", "FAIL", "토크부족"),
+            ("NAS1223", "HOLD", "재검사"),
+        )
+        raw, located = RawDocument.from_elements(
+            "kr",
+            [
+                Element(element_id="p1", kind=ElementKind.PARAGRAPH, page=1,
+                        text="검사 기록. " * 30),
+                Element(element_id="t1", kind=ElementKind.TABLE, page=1,
+                        text="", table_rows=rows),
+            ],
+        )
+        session.ingest(doc_id="kr", filename="kr.pdf", parser="test",
+                       raw=raw, elements=located)
+
+    def test_grammar_refusal_falls_back_to_llm_and_labels_the_source(self):
+        llm_proposal = {
+            "propose": True,
+            "note": "status column is a closed set",
+            "fields": [
+                {"name": "part_code", "kind": "text", "column": 0,
+                 "sample_value": "AN310-4", "row_index": 1, "required": True},
+                {"name": "status", "kind": "enum", "column": 1,
+                 "values": ["PASS", "FAIL", "HOLD"], "sample_value": "PASS",
+                 "row_index": 1, "required": True},
+                {"name": "memo", "kind": "text", "column": 2,
+                 "sample_value": "정상", "row_index": 1, "required": False},
+            ],
+        }
+        session = self._session_with_llm(llm_proposal)
+        self._ingest_all_text_table(session)
+
+        report = session.discovery_report()
+        row_cluster = next(
+            c for c in report.clusters if c.shape.startswith("row:")
+        )
+
+        proposal = session.propose_for(row_cluster.shape)
+
+        assert proposal is not None
+        assert proposal.source == "llm"
+        assert proposal.parseable
+        assert next(f for f in proposal.fields if f.name == "status").kind == "enum"
+
+    def test_llm_refusal_stays_an_honest_refusal(self):
+        llm_proposal = {"propose": False, "note": "cannot distinguish roles", "fields": []}
+        session = self._session_with_llm(llm_proposal)
+        self._ingest_all_text_table(session)
+
+        report = session.discovery_report()
+        row_cluster = next(
+            c for c in report.clusters if c.shape.startswith("row:")
+        )
+
+        proposal = session.propose_for(row_cluster.shape)
+
+        # Still None to the caller: a refusal is a refusal, whichever layer
+        # produced it. The UI never gets a guessed schema to show.
+        assert proposal is None
