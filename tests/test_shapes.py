@@ -383,3 +383,172 @@ class TestConstraintCompilation:
         )
 
         assert result.status is GroundingStatus.UNVERIFIABLE
+
+
+class TestAdoptionGate:
+    """Adoption is gated, not immediate: the contract must pass its gold cases
+    in the same process, against the same gate, before it registers.
+
+    '승인 ≠ 채택' in code: approval creates the contract and its cases; the
+    cases run; only a full pass registers. A failed case is recorded as a
+    falsification the owner can act on, and the registry stays untouched.
+    """
+
+    def _contract(self) -> ShapeContract:
+        return ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(name="torque_max", kind="number", required=True,
+                          min_ref="torque_min"),
+            ),
+        )
+
+    def _gate(self, text: str = "1/4-28  50-70  Coarse"):
+        from rag_ingest.grounding import GroundingGate
+        elements = [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text=text)]
+        raw, _located = RawDocument.from_elements("d", elements)
+        ref = ProvenanceRef(page=1, char_start=0, char_end=len(raw.pages[0].text),
+                            element_id="e1")
+        return GroundingGate(raw, shapes=ShapeRegistry.with_builtins()), ref
+
+    def test_passing_cases_register_the_contract(self):
+        from rag_ingest.shapes import GoldCaseSpec, adopt_contract
+
+        gate, _ref = self._gate()
+        cases = GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+        ])
+        registry = ShapeRegistry.with_builtins()
+
+        result = adopt_contract(gate, registry, self._contract(), cases)
+
+        assert result.registered is True
+        assert registry.lookup("torque_spec") is not None
+        assert result.failed_cases == ()
+
+    def test_enum_case_confirms_enforcement_and_registers(self):
+        # The owner declares an enum; a case asserts the gate MUST refuse an
+        # out-of-enum value. The gate refuses, the case's expectation is met,
+        # and adoption proceeds -- the constraint is proven, not assumed.
+        from rag_ingest.shapes import GoldCaseSpec, adopt_contract
+
+        gate, _ref = self._gate()
+        contract = ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(name="torque_max", kind="number", required=True,
+                          min_ref="torque_min"),
+                FieldSpec(name="series", kind="enum",
+                          values=("Coarse", "Fine"), required=True),
+            ),
+        )
+        cases = GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70",
+             "series": "Coarse"},
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70",
+             "series": "Medium", "expected": "mismatch"},  # gate MUST refuse
+        ])
+        registry = ShapeRegistry.with_builtins()
+
+        result = adopt_contract(gate, registry, contract, cases)
+
+        assert result.registered is True
+        assert registry.lookup("torque_spec") is contract
+        assert result.cases_run == 2
+
+    def test_case_expecting_refusal_but_gate_passing_is_a_recorded_failure(self):
+        # The falsification direction: the case EXPECTS the gate to refuse,
+        # the gate passes it -- that is a broken contract, and adoption must
+        # block with the failure recorded as a falsification.
+        from rag_ingest.shapes import GoldCaseSpec, adopt_contract
+
+        gate, _ref = self._gate(text="1/4-28  50-70  Medium  Coarse")
+        contract = ShapeContract(
+            name="no_enum",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="series", kind="text", required=True),
+            ),
+        )
+        # 'Medium' IS verbatim in the span, so grounding passes it -- the
+        # contract declares no enum, so nothing refuses it. The case expected
+        # a refusal: that is a falsified contract.
+        cases = GoldCaseSpec.from_claims("no_enum", [
+            {"thread_size": "1/4-28", "series": "Medium",
+             "expected": "mismatch"},  # gate will pass it
+        ])
+        registry = ShapeRegistry.with_builtins()
+
+        result = adopt_contract(gate, registry, contract, cases)
+
+        assert result.registered is False
+        assert registry.lookup("no_enum") is None
+        assert len(result.failed_cases) == 1
+        failure = result.failed_cases[0]
+        assert failure.case_index == 0
+        assert failure.expected == "mismatch"
+        assert failure.got == "grounded"
+
+    def test_expected_quarantine_case_passes_when_the_gate_refuses(self):
+        # The falsification direction: a case that EXPECTS refusal (an
+        # inverted range must be caught). If the gate failed to refuse, that
+        # is a hole in the contract, and adoption is blocked.
+        from rag_ingest.shapes import GoldCaseSpec, adopt_contract
+
+        gate, _ref = self._gate()
+        contract = self._contract()
+        cases = GoldCaseSpec.from_claims("torque_spec", [
+            {"thread_size": "1/4-28", "torque_min": "50", "torque_max": "70"},
+            {"thread_size": "1/4-28", "torque_min": "70", "torque_max": "50",
+             "expected": "mismatch"},  # inverted: the gate MUST refuse
+        ])
+        registry = ShapeRegistry.with_builtins()
+
+        result = adopt_contract(gate, registry, contract, cases)
+
+        assert result.registered is True
+        assert result.failed_cases == ()
+
+    def test_gate_that_fails_to_refuse_blocks_adoption(self):
+        # The critical adversarial case: the schema declares a constraint,
+        # a gold case expects it to be refused, and the gate passes it.
+        # That is a broken contract -- registering it would silently admit
+        # the value class the owner declared load-bearing.
+        from rag_ingest.shapes import GoldCaseSpec, adopt_contract
+
+        gate, _ref = self._gate()
+        # A contract with NO constraints: an inverted range cannot be caught.
+        contract = ShapeContract(
+            name="loose_range",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="lo", kind="number", required=True),
+                FieldSpec(name="hi", kind="number", required=True),
+            ),
+        )
+        cases = GoldCaseSpec.from_claims("loose_range", [
+            {"lo": "70", "hi": "50", "expected": "mismatch"},  # will PASS -> FAIL case
+        ])
+        registry = ShapeRegistry.with_builtins()
+
+        result = adopt_contract(gate, registry, contract, cases)
+
+        assert result.registered is False
+        assert len(result.failed_cases) == 1
+        assert result.failed_cases[0].expected == "mismatch"
+        assert result.failed_cases[0].got == "grounded"
+
+    def test_default_expectation_is_verified(self):
+        from rag_ingest.shapes import GoldCaseSpec
+
+        cases = GoldCaseSpec.from_claims("x", [{"a": "1"}, {"a": "2", "expected": "mismatch"}])
+
+        assert cases[0].expected == "verified"
+        assert cases[1].expected == "mismatch"

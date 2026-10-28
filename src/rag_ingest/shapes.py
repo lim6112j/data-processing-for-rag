@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from rag_ingest.docmodel import ProvenanceRef
 from rag_ingest.ontology import GateTier
 
 
@@ -120,6 +121,9 @@ class ShapeRegistry(BaseModel):
     ``register`` makes a shape effective immediately for the process lifetime;
     ``with_builtins`` seeds the registry with the ontology's existing shapes so
     the pipeline behaves identically before and after the contract pivot.
+    ``duplicate_with`` builds an isolated candidate registry for the adoption
+    gate -- the contract under test must not shadow live shapes while it is
+    still falsifiable.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -133,6 +137,18 @@ class ShapeRegistry(BaseModel):
         if contract.name in self._contracts:
             raise ValueError(f"shape {contract.name!r} is already registered")
         self._contracts[contract.name] = contract
+
+    def duplicate_with(self, contract: ShapeContract) -> ShapeRegistry:
+        """A copy of this registry plus the candidate, for gate testing.
+
+        If the candidate shares a name with a live shape, the candidate wins
+        in the copy -- the gate must evaluate the NEW contract, and a live
+        shape under the same name is exactly the thing adoption replaces.
+        """
+        clone = ShapeRegistry()
+        clone._contracts.update(self._contracts)
+        clone._contracts[contract.name] = contract
+        return clone
 
     @classmethod
     def with_builtins(cls) -> ShapeRegistry:
@@ -176,4 +192,124 @@ def _builtin_contracts() -> tuple[ShapeContract, ...]:
     )
 
 
-__all__ = ["FieldSpec", "ShapeContract", "ShapeRegistry"]
+class GoldCaseSpec(BaseModel):
+    """One adoption-gate case: claimed values and the expected verdict.
+
+    ``expected`` is the contract's promise about the world: a case claiming
+    good values must verify; a case claiming contradictory values must be
+    refused. The gate runs against the SAME pipeline the shape will use, in
+    the same process -- what is tested is what will run.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    values: dict[str, str]
+    expected: Literal["verified", "mismatch"] = "verified"
+
+    @classmethod
+    def from_claims(
+        cls, shape_name: str, claims: list[dict]
+    ) -> tuple[GoldCaseSpec, ...]:
+        cases = []
+        for claim in claims:
+            claim = dict(claim)
+            expected = claim.pop("expected", "verified")
+            cases.append(cls(values=claim, expected=expected))
+        return tuple(cases)
+
+
+class AdoptionResult(BaseModel):
+    """The gate's verdict on one contract: registered, or why not."""
+
+    model_config = ConfigDict(frozen=True)
+
+    registered: bool
+    name: str
+    cases_run: int = 0
+    failed_cases: tuple[CaseFailure, ...] = Field(default_factory=tuple)
+
+
+class CaseFailure(BaseModel):
+    """A falsification: this case proved the contract does not do what it
+    declared. Recorded for the owner -- it is the direction of the next fix,
+    not an error message."""
+
+    model_config = ConfigDict(frozen=True)
+
+    case_index: int
+    values: dict[str, str]
+    expected: str
+    got: str
+
+
+def adopt_contract(
+    gate,
+    registry: ShapeRegistry,
+    contract: ShapeContract,
+    cases: tuple[GoldCaseSpec, ...],
+) -> AdoptionResult:
+    """Run the adoption gate; register only on a full pass.
+
+    Every case is claimed against the contract through a *candidate* registry
+    -- the production registry is untouched until every case agrees, so a
+    failed contract cannot shadow or mutate anything already live. The gate
+    used is the standard one, with span re-derivation; what is tested is
+    what will run.
+    """
+    candidate_registry = registry.duplicate_with(contract)
+    candidate_gate = gate.with_registry(candidate_registry)
+    failures: list[CaseFailure] = []
+    for index, case in enumerate(cases):
+        claimed = _claims_from_values(candidate_gate, case.values)
+        result = candidate_gate.check_contract(contract.name, claimed)
+        got = result.status.value
+        expected_status = "grounded" if case.expected == "verified" else "mismatch"
+        if got != expected_status:
+            failures.append(
+                CaseFailure(
+                    case_index=index,
+                    values=case.values,
+                    expected=case.expected,
+                    got=got,
+                )
+            )
+    if failures:
+        return AdoptionResult(
+            registered=False,
+            name=contract.name,
+            cases_run=len(cases),
+            failed_cases=tuple(failures),
+        )
+    registry.register(contract)
+    return AdoptionResult(
+        registered=True, name=contract.name, cases_run=len(cases)
+    )
+
+
+def _claims_from_values(gate, values: dict[str, str]) -> dict:
+    """Turn a case's claimed values into grounded field claims.
+
+    The span is the whole raw buffer of the gate's document -- the same
+    convention as the gold-set replay extractor. Cases are about the
+    contract's semantics (does max>=min hold?), not about span arithmetic.
+    """
+    from rag_ingest.ontology import FieldValue
+
+    raw = gate._raw
+    ref = ProvenanceRef(
+        page=1, char_start=0, char_end=len(raw.pages[0].text), element_id="e1"
+    )
+    return {
+        name: FieldValue(value=value, provenance=ref) for name, value in values.items()
+    }
+
+
+__all__ = [
+    "AdoptionResult",
+    "CaseFailure",
+    "FieldSpec",
+    "GoldCaseSpec",
+    "ShapeContract",
+    "ShapeRegistry",
+    "adopt_contract",
+]

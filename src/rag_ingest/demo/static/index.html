@@ -121,6 +121,10 @@
       <div id="review"></div>
     </div>
     <div class="section">
+      <h2>Shape discovery</h2>
+      <div id="discovery" class="empty">Nothing discovered yet.</div>
+    </div>
+    <div class="section">
       <h2>T2 adjudication quality</h2>
       <div id="scorecard" class="empty">No corrections recorded yet.</div>
     </div>
@@ -330,14 +334,119 @@ function placeRelative(node, bbox, originLeft, originTop, scale) {
 
 /* ---------- sidebar ---------- */
 async function refreshSidebar() {
-  const [review, card, labels] = await Promise.all([
+  const [review, card, labels, discovery] = await Promise.all([
     (await fetch('/api/review')).json(),
     (await fetch('/api/scorecard')).json(),
     (await fetch('/api/labels')).json(),
+    (await fetch('/api/discovery')).json(),
   ]);
   renderReview(review.items);
   renderScorecard(card);
   renderLabels(labels.corrections);
+  renderDiscovery(discovery);
+}
+
+/* ---------- shape discovery: quarantine becomes a conversation ---------- */
+
+function renderDiscovery(report) {
+  const host = $('#discovery');
+  if (!report || !report.clusters || report.clusters.length === 0) {
+    host.className = 'empty';
+    host.textContent = 'Nothing discovered yet.';
+    return;
+  }
+  host.className = '';
+  host.innerHTML = `
+    <div class="meta" style="margin-bottom:8px">
+      ${report.unclassified_total} quarantined chunks form ${report.clusters.length} shape${report.clusters.length === 1 ? '' : 's'}:
+    </div>`
+    + report.clusters.map((c, i) => {
+        if (c.is_candidate) {
+          return `
+          <div class="card">
+            <div style="font-weight:600;margin-bottom:4px">${esc(c.shape)} — ${c.chunks} chunks, ${c.pages} pages, ${c.documents} documents</div>
+            <div class="chunk-text" style="margin-bottom:8px">${esc(c.sample_text)}</div>
+            <div class="meta">Recurring across your corpus — a new shape may be needed.</div>
+            <button onclick="proposeShape('${esc(c.shape)}')">Define this shape →</button>
+          </div>`;
+        }
+        return `
+          <div class="card">
+            <div style="font-weight:600;margin-bottom:4px">${esc(c.shape)} — ${c.chunks} chunks</div>
+            <div class="meta">Already handled by an existing shape. No action needed.</div>
+          </div>`;
+      }).join('');
+}
+
+async function proposeShape(shape) {
+  const host = $('#discovery');
+  const response = await fetch('/api/propose', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shape }),
+  });
+  if (response.status === 404) {
+    host.insertAdjacentHTML('beforeend',
+      `<div class="card"><div class="meta">Cannot propose a schema for this cluster — the rows do not have a recurring structure. Refusing is the honest outcome.</div></div>`);
+    return;
+  }
+  const proposal = await response.json();
+  if (!proposal.parseable) {
+    host.insertAdjacentHTML('beforeend',
+      `<div class="card"><div style="font-weight:600">Cannot propose</div>
+       <div class="meta">${esc(proposal.note)}</div></div>`);
+    return;
+  }
+  const fieldRows = proposal.fields.map(f => {
+    const parts = [`kind: ${f.kind}`];
+    if (f.required) parts.push('required');
+    if (f.min_ref) parts.push(`≥ ${f.min_ref}`);
+    if (f.values && f.values.length) parts.push(`one of [${f.values.join(', ')}]`);
+    return `<tr><td class="mono">${esc(f.name)}</td><td class="meta">${esc(parts.join(', '))}</td></tr>`;
+  }).join('');
+  const evidenceRows = proposal.evidence.slice(0, 6).map(e =>
+    `<div class="mono" style="font-size:11px">sample: ${esc(e.sample_value)} <span class="muted">(row ${e.row_index})</span></div>`).join('');
+  host.insertAdjacentHTML('beforeend', `
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:6px">Proposed shape: ${esc(proposal.shape_name)} (${esc(proposal.tier_declared)})</div>
+      <table style="margin-bottom:8px"><tbody>${fieldRows}</tbody></table>
+      <div class="meta" style="margin-bottom:4px">Evidence — each field was seen at these values in the source:</div>
+      ${evidenceRows}
+      <div class="row" style="margin-top:10px;gap:8px">
+        <button class="primary" onclick="adoptShape()">Adopt (gate runs first)</button>
+      </div>
+      <div class="meta" style="margin-top:6px">Adoption registers the contract immediately — no restart. The gate verifies values through the same span re-derivation as every built-in shape.</div>
+      <div id="adopt-status"></div>
+    </div>`);
+  window._pendingProposal = proposal;
+}
+
+async function adoptShape() {
+  const proposal = window._pendingProposal;
+  if (!proposal) return;
+  const status = $('#adopt-status');
+  const response = await fetch('/api/adopt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contract: {
+        name: proposal.shape_name,
+        tier: proposal.tier_declared,
+        fields: proposal.fields,
+      },
+    }),
+  });
+  if (response.status === 409) {
+    status.innerHTML = '<div class="meta" style="margin-top:8px">This shape is already registered.</div>';
+    return;
+  }
+  if (response.status === 422) {
+    const err = await response.json();
+    status.innerHTML = `<div class="err" style="margin-top:8px">Invalid contract: ${esc(err.detail || '')}</div>`;
+    return;
+  }
+  const body = await response.json();
+  status.innerHTML = `<div class="pill ok" style="margin-top:8px">✓ ${esc(body.name)} registered (${esc(body.tier)}) — effective immediately</div>`;
 }
 
 function renderLabels(corrections) {

@@ -451,6 +451,15 @@ class GroundingGate:
             return GroundingResult(status=GroundingStatus.INCOMPLETE, issues=tuple(issues))
         return GroundingResult(status=GroundingStatus.GROUNDED, issues=tuple(issues))
 
+    def with_registry(self, shapes: ShapeRegistry) -> GroundingGate:
+        """A copy of this gate bound to a different shape registry.
+
+        Used by the adoption gate: the candidate contract must be evaluated
+        in an isolated registry, without touching live shapes.
+        """
+        clone = GroundingGate(self._raw, shapes=shapes)
+        return clone
+
     def _check_field(self, name: str, field: FieldValue) -> Issue | None:
         ref = field.provenance
         if not ref.is_well_formed():
