@@ -41,6 +41,8 @@ select = ["E", "F", "I", "UP", "B", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # FastAPI's dependency injection requires calls in argument defaults.
 "src/rag_ingest/demo/server.py" = ["B008"]
+# Full-width characters in the unicode tests are the test data, not typos.
+"tests/test_docmodel_unicode.py" = ["RUF001", "RUF002", "RUF003"]
 
 [build-system]
 requires = ["uv_build>=0.11.22,<0.12.0"]

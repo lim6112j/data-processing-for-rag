@@ -8,9 +8,29 @@ PDF stack installed.
 
 from __future__ import annotations
 
+import unicodedata
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+def nfkc(text: str) -> str:
+    """The one canonical form: NFKC, applied at the buffer boundary.
+
+    Pages are built by joining ``Element.rendered()`` outputs, and char
+    offsets are computed over that join -- so the normalization MUST happen
+    before offsets exist, here, not at comparison sites. A page buffer in
+    NFD while chunk text is NFC would shift every ``ProvenanceRef`` (NFD is
+    longer in code points) and fail every string comparison between them.
+
+    NFKC rather than NFC: full-width digits and symbols (U+FF11..FF34, the
+    full-width won sign) are a parser's glyph-transfer choice, not document
+    content; leaving them breaks the amount regex and currency detection
+    while naming no real difference in the document. This is normalization of
+    representation, not repair -- the abstract characters are unchanged, so
+    the mark-never-repair policy is not engaged.
+    """
+    return unicodedata.normalize("NFKC", text)
 
 
 class ElementScores(BaseModel):
@@ -134,10 +154,14 @@ class Element(BaseModel):
 
         Tables keep their cells joined with a pipe so that a re-derivation pass
         can locate a numeric value inside the span it was claimed from.
+        Canonicalized through ``nfkc`` -- the same form the page buffer is
+        built in, so chunk text and buffer can never disagree on encoding.
         """
         if self.kind is ElementKind.TABLE and self.table_rows:
-            return "\n".join(" | ".join(row) for row in self.table_rows)
-        return self.text
+            rendered = "\n".join(" | ".join(row) for row in self.table_rows)
+        else:
+            rendered = self.text
+        return nfkc(rendered)
 
 
 class RawPage(BaseModel):
@@ -259,7 +283,17 @@ class RawDocument(BaseModel):
                 parts.append(rendered)
                 cursor += len(rendered)
                 located.append(
-                    element.model_copy(update={"char_start": start, "char_end": cursor})
+                    element.model_copy(
+                        update={
+                            "char_start": start,
+                            "char_end": cursor,
+                            # Canonicalize in step with the buffer: the
+                            # element's text, the chunk text built from it,
+                            # and the page buffer must all be the same form,
+                            # or char offsets point at the wrong code points.
+                            "text": rendered,
+                        }
+                    )
                 )
             width, height = sizes.get(page_no, (None, None))
             pages.append(
