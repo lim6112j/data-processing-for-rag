@@ -150,7 +150,10 @@ def _ingest_corpus(
 
     ``parser`` selects the primary stream:
 
-    * ``auto`` -- Docling when installed, pdfplumber otherwise.
+    * ``auto`` -- pdfplumber when the corpus is born-digital (the default
+      assumption); Docling only if pdfplumber cannot be imported. Measured on
+      the FAA manual: pdfplumber verified 96% of chunks where Docling reached
+      72% and generated 318 extra review questions.
     * ``docling`` -- layout model + TableFormer. Handles scans and complex
       layouts; can invent a grid.
     * ``pdfplumber`` -- raw text layer + geometric table detection. Faithful to
@@ -241,19 +244,35 @@ class _DisabledExtraction:
 
 
 def _select_parser(parser: str):
-    """Resolve the primary parse function, or (name, None) when unavailable."""
+    """Resolve the primary parse function, or (name, None) when unavailable.
+
+    ``auto`` means pdfplumber for born-digital corpora. Docling is only chosen
+    when pdfplumber cannot be imported at all. Measured: on a 646-page
+    digital-original manual, pdfplumber verified 96% of chunks while Docling
+    reached 72% and produced 318 extra review questions -- the layout model's
+    extra elements and per-page scores trip the tier gates on figure-heavy
+    pages. Docling remains the right primary for scanned input, which is not
+    this pipeline's corpus.
+    """
     name = parser.lower()
-    if name in ("auto", "docling"):
+    if name == "docling":
         try:
             from rag_ingest.adapters.docling import pdf_to_raw as docling_to_raw
         except ImportError:
-            if name == "docling":
+            return "docling", None
+        return "docling", docling_to_raw
+
+    try:
+        from rag_ingest.adapters.pdfplumber import pdf_to_raw as plumber_to_raw
+    except ImportError:
+        if name == "auto":
+            # pdfplumber unavailable: fall back to Docling rather than failing.
+            try:
+                from rag_ingest.adapters.docling import pdf_to_raw as docling_to_raw
+            except ImportError:
                 return "docling", None
-        else:
             return "docling", docling_to_raw
-
-    from rag_ingest.adapters.pdfplumber import pdf_to_raw as plumber_to_raw
-
+        raise
     return "pdfplumber", plumber_to_raw
 
 
@@ -337,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         "--parser",
         default="auto",
         choices=["auto", "docling", "pdfplumber"],
-        help="primary parse stream for --corpus (default: auto = docling if installed)",
+        help="primary parse stream for --corpus (default: auto = pdfplumber)",
     )
     parser.add_argument(
         "--no-extract",

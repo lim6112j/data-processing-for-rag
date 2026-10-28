@@ -237,3 +237,65 @@ clean text layer, so there is no OCR damage in it to find. This corpus cannot
 validate the marker against real damage; the gold-set case does that, and a
 scanned corpus would be the real-world test.
 
+
+## Third measurements (2026-10-28, born-digital pivot + deterministic checks)
+
+The pipeline pivoted to **born-digital only**: the OCR machinery
+(`defects.py`, character-substitution matching, `RETRY_OCR`, `ocr_score`,
+Docling's OCR pass) was removed after the corpus scope was fixed to digital
+documents. In its place the pipeline gained deterministic semantic checks
+(`checks.py`): date plausibility and line-item arithmetic reconciliation
+(ontology v1.1).
+
+| Corpus / parser | chunks | verified | quarantined | verification |
+|---|---|---|---|---|
+| sample 25p / pdfplumber | 28 | 27 | 1 | 96% |
+| sample 25p / docling | 49 | 39 | 10 | 80% |
+| full 646p / pdfplumber | 754 | 722 | 32 | 96% |
+| **full 646p / docling** | **1,129** | **811** | **318** | **72%** |
+
+### Reading 5: pdfplumber beats Docling on this corpus, by a lot
+
+The born-digital numbers inverted the earlier assumption that Docling is the
+"primary" parser. On a digital-original manual:
+
+- **pdfplumber: 96% verification, 754 chunks.** The 32 quarantines are the
+  known `multi_page_span` refusals — unchanged since the second measurement.
+- **Docling: 72% verification, 1,129 chunks — and 318 quarantines.** Breakdown:
+  307 `unclassified`, 10 `ungrounded`, 1 `structure_ambiguous`, plus ~320
+  elements escalating at the tier gate (`extraction_failed`) before chunking.
+  Docling's layout model produces many more elements from the same pages, and
+  its per-element scores trip the parse/layout floors on figure-heavy and
+  table-heavy pages.
+
+`--parser auto` currently prefers Docling when importable. **That default is
+now wrong for born-digital documents**: it cost 24 points of verification and
+318 unnecessary review questions on this corpus. The default should flip to
+pdfplumber for born-digital corpora, or auto should compare parse scores and
+keep the parser that distrusts fewer pages.
+
+### Reading 6: the second parse is cheap and still earns nothing for T2
+
+With `--second-parse`, 72% of chunks (542/754) show parser disagreement — but
+`T2 consulted: 0`. The disagreement the producer finds is text-level (whitespace,
+reading order), not structural, so the adjudication question is never built.
+T2 remains a dead path on born-digital input; its earning role is still the one
+`survey.md` points at: adjudicating claims about data quality, not parser readings.
+
+### Reading 7: table-cell loss is confirmed and now measurable
+
+Docling dropped cells in **seven** tables this run (41/233 in TABLE 7-1 plus six
+smaller losses). pdfplumber's geometric extraction keeps them. For any
+table→row path (torque specs are the corpus's DB-bound content), pdfplumber is
+the parser, and a cell-count cross-check between parsers is the mechanism that
+turns silent loss into a review item — the next increment list above stands.
+
+### What changed since the second measurement
+
+- Verification on pdfplumber/full is unchanged (722/754) — the born-digital
+  pivot and the new checks did not disturb the working path.
+- The date-plausibility and arithmetic checks fired **zero** times on this
+  corpus: it contains no ISO dates and no reconcilable line items. The gold
+  set is their contract; a business-document corpus would exercise them.
+- NFKC normalization is now at the buffer boundary; this document is already
+  NFC, so no measurable change — but Korean business documents will hit it.
