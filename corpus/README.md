@@ -299,3 +299,18 @@ turns silent loss into a review item — the next increment list above stands.
   set is their contract; a business-document corpus would exercise them.
 - NFKC normalization is now at the buffer boundary; this document is already
   NFC, so no measurable change — but Korean business documents will hit it.
+
+## Fourth measurement (2026-10-28, multi-page quotation)
+
+`ProseExtractor` now quotes a cross-page chunk through one `ProvenanceRef`
+per page (`FieldValue.multi_page_spans`), and the LENIENT check verifies the
+ordered join of the per-page slices — the fidelity guarantee survives the
+boundary instead of refusing at it.
+
+| Corpus / parser | chunks | verified | quarantined | verification |
+|---|---|---|---|---|
+| full 646p / pdfplumber (before) | 754 | 722 | 32 multi_page_span | 96% |
+| **full 646p / pdfplumber (after)** | **754** | **754** | **0** | **100%** |
+
+All 32 quarantines resolved. pdfplumber is now the end-to-end default
+(`--parser auto`), and the full manual verifies with zero quarantine.
