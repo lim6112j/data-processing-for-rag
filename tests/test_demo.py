@@ -1121,3 +1121,60 @@ class TestContractPersistence:
         session = DemoSession(today=TODAY, shapes_path=tmp_path / "shapes.json")
         # Fails closed to builtins, never a partial registry.
         assert session.registry().lookup("invoice") is not None
+
+
+class TestRowDiscoveryInSession:
+    """Session discovery reports row-level clusters: rows are the unit of
+    recurrence, so a quarantined TABLE chunk contributes one observation
+    per row -- a recurring row shape across tables is what the owner is
+    asked to define."""
+
+    def _ingest_real_tables(self, session):
+        # Real TABLE elements: the row-routing path, not paragraph mimicry.
+        rows = (
+            ("Thread Size", "Tension", "Shear"),
+            ("8-36", "12-15", "7-9"),
+            ("10-32", "20-25", "12-15"),
+            ("1/4-28", "50-70", "30-40"),
+        )
+        raw, located = RawDocument.from_elements(
+            "tbl",
+            [
+                Element(element_id="p1", kind=ElementKind.PARAGRAPH, page=1,
+                        text="Torque values. " * 30),
+                Element(element_id="t1", kind=ElementKind.TABLE, page=1,
+                        text="", table_rows=rows),
+            ],
+        )
+        session.ingest(doc_id="tbl", filename="t.pdf", parser="test",
+                       raw=raw, elements=located)
+
+    def test_discovery_report_includes_row_clusters(self):
+        from rag_ingest.demo.session import DemoSession
+
+        session = DemoSession(today=TODAY)
+        self._ingest_real_tables(session)
+
+        report = session.discovery_report()
+
+        assert report is not None
+        row_clusters = [c for c in report.clusters if c.shape.startswith("row:")]
+        assert row_clusters, "row observations never reached discovery"
+
+    def test_row_cluster_is_proposable_from_row_observations(self):
+        from rag_ingest.demo.session import DemoSession
+
+        session = DemoSession(today=TODAY)
+        self._ingest_real_tables(session)
+
+        report = session.discovery_report()
+        row_cluster = next(
+            c for c in report.clusters if c.shape.startswith("row:")
+        )
+
+        proposal = session.propose_for(row_cluster.shape)
+
+        assert proposal is not None
+        assert proposal.parseable
+        names = [f.name for f in proposal.fields]
+        assert "thread_size" in names or any("min" in n for n in names)

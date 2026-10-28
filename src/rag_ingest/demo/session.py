@@ -254,15 +254,35 @@ class DemoSession:
     # -- shape discovery ---------------------------------------------------
 
     def discovery_report(self):
-        """Shape clusters across every ingested document's quarantined chunks."""
-        from rag_ingest.discovery import discover
+        """Shape clusters across every ingested document's quarantined chunks.
+
+        Quarantined table chunks are routed to rows first: a table is not one
+        fact, it is N rows sharing a shape, and row recurrence -- not blob
+        recurrence -- is what a row-shape declaration should be asked about.
+        """
+        from rag_ingest.discovery import discover, discover_from_rows
 
         quarantined: list = []
+        row_observations = []
         for outcome in self.outcomes.values():
             quarantined.extend(outcome.quarantined_chunks)
-        if not quarantined:
+            row_observations.extend(outcome.row_observations)
+        if not quarantined and not row_observations:
             return None
-        report = discover(tuple(quarantined))
+        report = discover(tuple(quarantined)) if quarantined else None
+        row_report = discover_from_rows(tuple(row_observations)) if row_observations else None
+        if report is None and row_report is None:
+            return None
+        if report is None:
+            return row_report if row_report.unclassified_total else None
+        if row_report is not None and row_report.unclassified_total:
+            from dataclasses import replace
+
+            report = replace(
+                report,
+                clusters=report.clusters + row_report.clusters,
+                unclassified_total=report.unclassified_total + row_report.unclassified_total,
+            )
         return report if report.unclassified_total else None
 
     def propose_for(self, shape: str):
@@ -277,6 +297,23 @@ class DemoSession:
         from rag_ingest.propose import propose as build_proposal
 
         rows: list[tuple[str, ...]] = []
+        if shape.startswith("row:"):
+            # Row clusters propose from the routed row cells directly -- no
+            # re-parsing of chunk text, which would re-derive from a
+            # different grammar than the cluster was keyed on.
+            from rag_ingest.discovery import row_signatures
+
+            all_rows = tuple(
+                row for outcome in self.outcomes.values() for row in outcome.row_observations
+            )
+            signatures = row_signatures(all_rows)
+            rows = [
+                row.cells for row in all_rows
+                if signatures[id(row)] == shape
+            ][:5]
+            if not rows:
+                return None
+            return build_proposal(shape, tuple(rows), shape_name=f"{shape}_spec")
         for outcome in self.outcomes.values():
             for record in outcome.quarantined_chunks:
                 extraction = record.extraction
