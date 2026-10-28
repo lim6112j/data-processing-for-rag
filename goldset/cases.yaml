@@ -112,3 +112,24 @@ cases:
     expected:
       verified: 1
       reason: extraction_failed
+
+  - id: damaged-prose-is-marked-not-quarantined
+    description: >
+      An OCR-damaged amount inside ordinary prose. The cleaning policy is mark,
+      never repair: the chunk is admitted on quotation fidelity -- it is what
+      the source says -- and the suspected damage is stamped on the record, so
+      the correction decision stays with a human instead of moving silently to
+      the answering model. Quarantining this would discard the only evidence of
+      what the document actually says; repairing it would invent a value with a
+      plausible citation attached.
+    class: prose
+    scores: { ocr: 0.92, layout: 0.93, parse: 0.94 }
+    pages:
+      - |
+        The ledger recorded the total as l,234.56 last quarter.
+    extractor_claim: prose
+    expected:
+      verified: 1
+      quarantined: 0
+      reason: null
+      defects: [suspected_ocr_damage]

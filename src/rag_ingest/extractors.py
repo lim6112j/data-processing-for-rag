@@ -26,6 +26,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from rag_ingest.chunking import Chunk, ChunkKind
+from rag_ingest.defects import DAMAGED_AMOUNT
 from rag_ingest.ontology import (
     AbstainReason,
     Extraction,
@@ -59,8 +60,9 @@ _DATE = re.compile(r"\b(?P<date>\d{4}-\d{2}-\d{2})\b")
 #: OCR read a lowercase L for the leading 1 ("l,234.56"). Detecting this is what
 #: separates "the field is absent" from "the field is there and unreadable":
 #: reporting the latter as NOT_PRESENT hides a real extraction failure inside a
-#: legitimate-looking abstention.
-_DAMAGED_AMOUNT = re.compile(r"[lIO|][,.]\d{3}|\d[,.]\d{3}[,.][lIO]")
+#: legitimate-looking abstention. Owned by ``defects`` and shared, because the
+#: same pattern drives defect marking on admitted prose.
+_DAMAGED_AMOUNT = DAMAGED_AMOUNT
 
 #: Text that looks like a document header rather than an invoice.
 _INVOICE_HINT = re.compile(r"(?i)\b(invoice|tax invoice|receipt|청구서|계산서)\b")

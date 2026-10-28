@@ -23,6 +23,7 @@ from rag_ingest.adjudication import (
 )
 from rag_ingest.candidates import CandidateProducer, NullProducer, describe_disagreement
 from rag_ingest.chunking import Chunk, Chunker
+from rag_ingest.defects import scan_defects
 from rag_ingest.docmodel import Element, ProvenanceRef, RawDocument
 from rag_ingest.escalation import (
     Correction,
@@ -37,6 +38,7 @@ from rag_ingest.ontology import (
     PIPELINE_VERSION,
     AbstainReason,
     ChunkRecord,
+    DefectCode,
     Extraction,
     GateTier,
 )
@@ -532,11 +534,17 @@ def _to_record(
     result: GroundingResult | None,
     tier: GateTier | None = None,
 ) -> ChunkRecord:
+    verified = bool(result is not None and result.verified)
     return _chunk_to_record(
         chunk,
-        verified=bool(result is not None and result.verified),
+        verified=verified,
         extraction=extraction,
         tier=tier,
+        # Marked, never repaired: an admitted defect stays visible, so the
+        # correction decision stays with a human rather than moving silently to
+        # the consumer. Marks describe text that entered retrieval, which is why
+        # quarantined records carry none.
+        defects=scan_defects(chunk.text) if verified else (),
     )
 
 
@@ -545,6 +553,7 @@ def _chunk_to_record(
     verified: bool,
     extraction: Extraction | None,
     tier: GateTier | None = None,
+    defects: tuple[DefectCode, ...] = (),
 ) -> ChunkRecord:
     return ChunkRecord(
         chunk_id=chunk.chunk_id,
@@ -556,6 +565,7 @@ def _chunk_to_record(
         pipeline_version=PIPELINE_VERSION,
         extraction=extraction,
         gate_tier=tier,
+        defects=defects,
     )
 
 

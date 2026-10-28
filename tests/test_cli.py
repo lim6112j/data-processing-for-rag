@@ -14,8 +14,12 @@ def test_default_goldset_passes(capsys):
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "6/6 cases passed" in captured.out
-    assert "PASS" in captured.out
+    # Not "N/N" with a hardcoded N: a new case must not need a test edit. What
+    # matters is that the count matches and every case line says PASS.
+    passed = sum(1 for line in captured.out.splitlines() if "[PASS]" in line)
+    assert f"{passed}/{passed} cases passed" in captured.out
+    assert passed > 0
+    assert "[FAIL]" not in captured.out
 
 
 def test_missing_file_returns_usage_error(capsys):

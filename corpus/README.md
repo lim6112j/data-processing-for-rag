@@ -220,3 +220,20 @@ declines rather than quoting only the part it can cite.
 3. **A cell-count cross-check** between Docling and pdfplumber for table chunks, so
    dropped cells become a review item instead of an invisible loss.
 
+### Defect marking (2026-10-28)
+
+The cleaning policy question was settled as **mark, never repair**: damaged text
+is admitted as what the source says, stamped with `suspected_ocr_damage`, and
+stays retrievable. survey.md §1 (LLM repair max match 0.028) and §6.1 (human edit
+hit rate 20–30%) both say repair is the weaker move; an unmarked defect does not
+disappear, it moves into the answering model, which silently corrects it with no
+record. The gold set now carries `damaged-prose-is-marked-not-quarantined`, which
+locks in both halves of the policy: admitted *and* marked. A future change that
+silently quarantines or repairs damaged prose will fail it.
+
+Measured on this corpus: **0 of 782 chunks marked (sample 28 + full 754)**. That
+is the correct result, not a miss — the FAA manual is a digital original with a
+clean text layer, so there is no OCR damage in it to find. This corpus cannot
+validate the marker against real damage; the gold-set case does that, and a
+scanned corpus would be the real-world test.
+

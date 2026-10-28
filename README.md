@@ -1,6 +1,6 @@
 # rag-ingest
 
-**Status:** working prototype. 345 tests, runs real PDFs end-to-end
+**Status:** working prototype. 356 tests, runs real PDFs end-to-end
 through Docling + pdfplumber with OpenRouter as the adjudication backend, and
 ships an interactive demo server.
 
@@ -54,8 +54,15 @@ range checks that are meant to separate them are not built yet. `LENIENT` verifi
 this place". Every record stamps its tier, so the two claims are never conflated.
 A LENIENT bar on a typed record raises rather than quietly admitting it.
 
+The cleaning policy for damaged text is **mark, never repair**. An admitted chunk
+whose text carries an OCR-damage pattern is stamped `defects=("suspected_ocr_damage",)`
+and stays retrievable as what the source says. Repair is not attempted -- the best
+LLM repair configuration in the survey matched a reference 0.028 of the time, and
+unmarked damage simply moves the correction into the answering model, silently.
+The mark keeps that decision with a human.
+
 ```bash
-uv run pytest                          # 345 tests, no network
+uv run pytest                          # 356 tests, no network
 uv run rag-demo                        # interactive UI on :8765
 uv run rag-goldset                     # decision-level gold set (6/6)
 uv run rag-goldset --corpus ./pdfs     # real PDFs, per-document accounting
@@ -475,6 +482,7 @@ src/rag_ingest/
     openrouter.py T2 backend: structured output, image input, degrades safely
   pipeline.py     T0 -> T1 -> T2 -> quarantine orchestration
   gate_tier.py    which bar a claimed record must clear, from its ontology type
+  defects.py      mechanical defect marking on admitted text -- mark, never repair
   goldset.py      gold-set loader, replay extractor, decision checker
   cli.py          `rag-goldset`
   demo/
@@ -484,14 +492,14 @@ src/rag_ingest/
     producers.py    scripted second reading, so T2 is reachable in a demo
     fake_adjudicator.py  scripted T2 -- shape of the path, not judgement
     static/index.html    the UI
-tests/            345 tests
+tests/            356 tests
 goldset/cases.yaml  adversarial cases, each asserting a decision
 ```
 
 ## Run it
 
 ```bash
-uv run pytest                                 # 345 tests
+uv run pytest                                 # 356 tests
 uv run pytest -m live                         # one real OpenRouter call
 uv run pytest --cov=rag_ingest                # coverage
 uv run rag-goldset                            # gold-set report
