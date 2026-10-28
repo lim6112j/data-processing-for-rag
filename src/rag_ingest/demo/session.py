@@ -11,17 +11,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag_ingest.adjudication import AdjudicationDecision
 from rag_ingest.chunking import Chunk, Chunker
 from rag_ingest.circuit import BreakerStatus, T2CircuitBreaker
-from rag_ingest.docmodel import BBox, Element, RawDocument
+from rag_ingest.docmodel import BBox, Element, ElementKind, ProvenanceRef, RawDocument
 from rag_ingest.escalation import Correction, ReviewerRole, ReviewItem, ReviewQueue
 from rag_ingest.extractors import TemplateExtractor
 from rag_ingest.pipeline import IngestOutcome, IngestPipeline
 from rag_ingest.scoring import T2ScoreCard, feed_breaker, score
+
+if TYPE_CHECKING:
+    from rag_ingest.shapes import ShapeRegistry
 
 
 class ChunkView(BaseModel):
@@ -123,6 +127,11 @@ class DemoSession:
     chunk_index: dict[str, Chunk] = field(default_factory=dict)
     views: dict[str, IngestView] = field(default_factory=dict)
     _breaker: T2CircuitBreaker | None = None
+    #: Per-document outcomes, kept so discovery can cluster the quarantined
+    #: chunks after the fact. The view records decisions; the outcome holds
+    #: the records discovery reads.
+    outcomes: dict[str, IngestOutcome] = field(default_factory=dict)
+    _shapes: ShapeRegistry | None = None
 
     # -- ingestion --------------------------------------------------------
 
@@ -167,6 +176,7 @@ class DemoSession:
         self.documents[doc_id] = raw
         self.chunk_index.update({chunk.chunk_id: chunk for chunk in chunks})
 
+        self.outcomes[doc_id] = outcome
         view = IngestView(
             doc_id=doc_id,
             filename=filename,
@@ -216,6 +226,89 @@ class DemoSession:
         if self._breaker is None:
             self._breaker = T2CircuitBreaker(self.adjudicator)
         return self._breaker
+
+    # -- shape discovery ---------------------------------------------------
+
+    def discovery_report(self):
+        """Shape clusters across every ingested document's quarantined chunks."""
+        from rag_ingest.discovery import discover
+
+        quarantined: list = []
+        for outcome in self.outcomes.values():
+            quarantined.extend(outcome.quarantined_chunks)
+        if not quarantined:
+            return None
+        report = discover(tuple(quarantined))
+        return report if report.unclassified_total else None
+
+    def propose_for(self, shape: str):
+        """A schema claim for one cluster, from its sample rows.
+
+        The grammar proposer needs rows; the quarantined chunks are prose-shaped
+        text, so the samples are their raw text split on the table pipe the
+        shape hint was derived from. A cluster whose rows do not parse yields
+        an honest refusal -- the UI shows that as "cannot propose", never as a
+        guessed schema.
+        """
+        from rag_ingest.propose import propose as build_proposal
+
+        rows: list[tuple[str, ...]] = []
+        for outcome in self.outcomes.values():
+            for record in outcome.quarantined_chunks:
+                extraction = record.extraction
+                if extraction is None or getattr(extraction, "kind", "") != "unclassified":
+                    continue
+                if extraction.observed_shape != shape:
+                    continue
+                for line in record.text.strip().splitlines():
+                    cells = tuple(c.strip() for c in line.split("|"))
+                    if len(cells) > 1:
+                        rows.append(cells)
+        if not rows:
+            return None
+        return build_proposal(shape, tuple(rows[:5]), shape_name=f"{shape}_spec")
+
+    def registry(self):
+        """The runtime shape registry: built-ins plus anything adopted."""
+        from rag_ingest.shapes import ShapeRegistry
+
+        if self._shapes is None:
+            self._shapes = ShapeRegistry.with_builtins()
+        return self._shapes
+
+    def adopt(self, contract) -> None:
+        """Make an owner-approved contract effective immediately -- no restart.
+
+        Persistence is the caller's deployment concern (the contract serializes
+        with ``to_definition``); adopting here is the runtime act.
+        """
+        self.registry().register(contract)
+
+    def check_against_shape(self, shape_name: str, text: str, values: dict[str, str]):
+        """Verify a new chunk's values against an adopted shape.
+
+        The same gate, the same span re-derivation: this exists so the UI (and
+        tests) can demonstrate the adopted contract biting real values.
+        """
+        from rag_ingest.grounding import GroundingGate
+        from rag_ingest.ontology import FieldValue
+
+        raw, located = RawDocument.from_elements(
+            f"shape-check:{shape_name}",
+            [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text=text)],
+        )
+        located_element = located[0]
+        ref = ProvenanceRef(
+            page=located_element.page,
+            char_start=located_element.char_start,
+            char_end=located_element.char_end,
+            element_id=located_element.element_id,
+        )
+        gate = GroundingGate(raw, shapes=self.registry())
+        claimed = {
+            name: FieldValue(value=value, provenance=ref) for name, value in values.items()
+        }
+        return gate.check_contract(shape_name, claimed)
 
     # -- review -----------------------------------------------------------
 

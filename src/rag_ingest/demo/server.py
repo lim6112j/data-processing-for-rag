@@ -179,6 +179,104 @@ def resolve(body: ReviewRequest) -> dict:
     return _scorecard_payload(card)
 
 
+class AdoptRequest(BaseModel):
+    """An owner-approved shape contract, arriving as data."""
+
+    contract: dict
+
+
+class VerifyShapeRequest(BaseModel):
+    """Values for a new chunk, checked against an adopted shape."""
+
+    shape: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    values: dict[str, str]
+
+
+@app.get("/api/discovery")
+def discovery() -> dict | None:
+    """Shape clusters among quarantined chunks, across ingested documents."""
+    report = _session.discovery_report()
+    if report is None:
+        return None
+    return {
+        "unclassified_total": report.unclassified_total,
+        "clusters": [
+            {
+                "shape": c.shape,
+                "chunks": c.chunks,
+                "pages": c.pages,
+                "documents": c.documents,
+                "sample_text": c.sample_text,
+                "is_candidate": c.is_candidate,
+            }
+            for c in report.clusters
+        ],
+    }
+
+
+@app.post("/api/propose")
+def propose_schema(body: dict) -> dict:
+    """A schema claim for one shape cluster, with per-field evidence.
+
+    404 on an unknown or absent cluster: the UI must show "cannot propose"
+    rather than a guessed schema.
+    """
+    shape = (body or {}).get("shape", "")
+    report = _session.discovery_report()
+    known = {c.shape for c in report.clusters} if report else set()
+    if shape not in known:
+        raise HTTPException(404, f"no quarantined cluster for shape {shape!r}")
+    proposal = _session.propose_for(shape)
+    if proposal is None:
+        raise HTTPException(404, f"cannot propose for shape {shape!r}")
+    return {
+        "shape_name": proposal.shape_name,
+        "tier_declared": proposal.tier_declared,
+        "source": proposal.source,
+        "parseable": proposal.parseable,
+        "note": proposal.note,
+        "fields": [f.model_dump(mode="json") for f in proposal.fields],
+        "evidence": [
+            {"sample_value": e.sample_value, "row_index": e.row_index}
+            for e in proposal.evidence
+        ],
+    }
+
+
+@app.post("/api/adopt")
+def adopt(body: AdoptRequest) -> dict:
+    """Register an owner-approved contract. Effective immediately, no restart."""
+    from rag_ingest.shapes import ShapeContract
+
+    try:
+        contract = ShapeContract.from_definition(body.contract)
+    except Exception as exc:
+        raise HTTPException(422, f"invalid contract: {exc}") from exc
+    try:
+        _session.adopt(contract)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"registered": True, "name": contract.name, "tier": contract.tier.value}
+
+
+@app.post("/api/verify-shape")
+def verify_shape(body: VerifyShapeRequest) -> dict:
+    """Check values against an adopted shape through the standard gate."""
+    try:
+        result = _session.check_against_shape(body.shape, body.text, body.values)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {
+        "status": result.status.value,
+        "verified": result.verified,
+        "issues": [
+            {"field": i.field, "status": i.status.value, "message": i.message}
+            for i in result.issues
+        ],
+    }
+
+
 @app.get("/api/labels")
 def labels() -> dict:
     """Every correction recorded, in the form the eval loop consumes.

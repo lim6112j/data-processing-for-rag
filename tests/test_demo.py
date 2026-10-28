@@ -585,3 +585,320 @@ class TestLabelsAreVisible:
 
         assert exit_code == 0
         assert len(json.loads(path.read_text())["corrections"]) == 1
+
+
+class TestShapeDiscoveryFlow:
+    """The owner sees quarantined chunks as shape candidates, approves one,
+    and the pipeline verifies the next chunk against it -- no restart."""
+
+    def _session(self):
+        from rag_ingest.demo.session import DemoSession
+
+        return DemoSession(today=TODAY)
+
+    def _ingest_tables(self, session, doc_id="tables"):
+        # Three documents, each one oversized tabular chunk on its own page --
+        # exactly the recurring-shape situation discovery exists for: same
+        # shape, multiple chunks, multiple pages, no ontology entry for it.
+        for i in range(3):
+            filler = "Torque limits for standard hardware. " * 60
+            text = f"TABLE 7-{i} torque values. | 1/4-{i} | 50-70 | Coarse | {filler}"
+            raw, elements = RawDocument.from_elements(
+                f"{doc_id}{i}",
+                [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text=text)],
+            )
+            session.ingest(
+                doc_id=f"{doc_id}{i}",
+                filename=f"t{i}.pdf",
+                parser="test",
+                raw=raw,
+                elements=elements,
+            )
+
+    def test_discovery_reports_tabular_cluster_after_ingest(self):
+        session = self._session()
+        self._ingest_tables(session)
+
+        report = session.discovery_report()
+
+        assert report is not None
+        assert report.unclassified_total > 0
+
+    def test_no_documents_means_no_report(self):
+        session = self._session()
+
+        assert session.discovery_report() is None
+
+    def test_empty_quarantine_reports_nothing(self):
+        from rag_ingest.demo.session import DemoSession
+
+        session = DemoSession(today=TODAY)
+        raw, elements = RawDocument.from_elements(
+            "clean",
+            [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1,
+                     text="INVOICE\nInvoice INV-2041\nTotal 1,234.56 KRW")],
+        )
+        session.ingest(doc_id="clean", filename="c.pdf", parser="test",
+                       raw=raw, elements=elements)
+
+        assert session.discovery_report() is None
+
+    def test_proposal_from_cluster_is_deterministic_and_evidenced(self):
+        session = self._session()
+        self._ingest_tables(session)
+
+        report = session.discovery_report()
+        candidate = report.candidates[0]
+
+        proposal = session.propose_for(candidate.shape)
+
+        assert proposal is not None
+        # Deterministic: same inputs, same proposal (run twice).
+        again = session.propose_for(candidate.shape)
+        assert again.fields == proposal.fields
+
+    def test_adopt_registers_the_contract_without_a_restart(self):
+        from rag_ingest.gate_tier import GateTier
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        session = self._session()
+        self._ingest_tables(session)
+
+        contract = ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(name="torque_max", kind="number", required=True,
+                          min_ref="torque_min"),
+            ),
+        )
+
+        session.adopt(contract)
+
+        assert session.registry().lookup("torque_spec") is contract
+
+    def test_adopted_contract_verifies_the_next_chunk(self):
+        from rag_ingest.gate_tier import GateTier
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        session = self._session()
+        self._ingest_tables(session)
+        contract = ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(name="torque_max", kind="number", required=True,
+                          min_ref="torque_min"),
+            ),
+        )
+        session.adopt(contract)
+
+        # A new chunk arrives after adoption; its values claim the new shape.
+        result = session.check_against_shape(
+            "torque_spec",
+            "TABLE 7-2: 7/16-20 torque 450-500",
+            {
+                "thread_size": "7/16-20",
+                "torque_min": "450",
+                "torque_max": "500",
+            },
+        )
+
+        assert result.verified is True
+
+    def test_adopted_contract_refuses_an_inverted_range(self):
+        from rag_ingest.gate_tier import GateTier
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        session = self._session()
+        self._ingest_tables(session)
+        contract = ShapeContract(
+            name="torque_spec",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="thread_size", kind="text", required=True),
+                FieldSpec(name="torque_min", kind="number", required=True),
+                FieldSpec(name="torque_max", kind="number", required=True,
+                          min_ref="torque_min"),
+            ),
+        )
+        session.adopt(contract)
+
+        result = session.check_against_shape(
+            "torque_spec",
+            "TABLE 7-2: 7/16-20 torque 500-450",  # inverted, verbatim
+            {
+                "thread_size": "7/16-20",
+                "torque_min": "500",
+                "torque_max": "450",
+            },
+        )
+
+        assert result.verified is False
+
+
+class TestShapeDiscoveryAPI:
+    """The UI surface: discovery visible, proposal evidenced, adoption live."""
+
+    def _client_with_tables(self):
+        from fastapi.testclient import TestClient
+
+        from rag_ingest.demo.server import _session, app
+        from rag_ingest.escalation import ReviewQueue
+
+        _session.__dict__.update(
+            {
+                "outcomes": {},
+                "_shapes": None,
+                "queue": ReviewQueue(),
+                "views": {},
+                "documents": {},
+                "chunk_index": {},
+            }
+        )
+        session = _session
+        filler = "Torque limits for standard hardware. " * 60
+        for i in range(3):
+            text = f"TABLE 7-{i} torque values. | 1/4-{i} | 50-70 | Coarse | {filler}"
+            raw, elements = RawDocument.from_elements(
+                f"t{i}",
+                [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text=text)],
+            )
+            session.ingest(doc_id=f"t{i}", filename=f"t{i}.pdf", parser="test",
+                           raw=raw, elements=elements)
+        return TestClient(app), session
+
+    def test_discovery_endpoint_lists_clusters(self):
+        client, _ = self._client_with_tables()
+
+        response = client.get("/api/discovery")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["unclassified_total"] == 3
+        assert payload["clusters"][0]["shape"] == "tabular"
+        assert payload["clusters"][0]["is_candidate"] is True
+
+    def test_discovery_endpoint_is_empty_without_quarantine(self):
+        from fastapi.testclient import TestClient
+
+        from rag_ingest.demo.server import _session, app
+
+        client = TestClient(app)
+        _session.__dict__.update({"outcomes": {}, "_shapes": None})
+
+        response = client.get("/api/discovery")
+
+        assert response.status_code == 200
+        assert response.json() is None
+
+    def test_propose_endpoint_returns_schema_with_evidence(self):
+        client, _ = self._client_with_tables()
+
+        response = client.post("/api/propose", json={"shape": "tabular"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["parseable"] is True
+        assert any(f["name"] == "torque_min" for f in payload["fields"])
+
+    def test_propose_endpoint_refuses_unknown_shape(self):
+        client, _ = self._client_with_tables()
+
+        response = client.post("/api/propose", json={"shape": "nonexistent"})
+
+        assert response.status_code == 404
+
+    def test_adopt_endpoint_registers_and_reports_gold_status(self):
+        client, session = self._client_with_tables()
+
+        contract = {
+            "name": "torque_spec",
+            "tier": "strict",
+            "fields": [
+                {"name": "thread_size", "kind": "text", "required": True},
+                {"name": "torque_min", "kind": "number", "required": True},
+                {"name": "torque_max", "kind": "number", "required": True,
+                 "min_ref": "torque_min"},
+            ],
+        }
+        response = client.post("/api/adopt", json={"contract": contract})
+
+        assert response.status_code == 200
+        assert response.json()["registered"] is True
+        assert session.registry().lookup("torque_spec") is not None
+
+    def test_adopt_rejects_an_invalid_contract(self):
+        client, _ = self._client_with_tables()
+
+        contract = {
+            "name": "bad",
+            "tier": "strict",
+            "fields": [
+                {"name": "x", "kind": "number", "required": True,
+                 "min_ref": "ghost_field"},
+            ],
+        }
+        response = client.post("/api/adopt", json={"contract": contract})
+
+        assert response.status_code == 422
+
+    def test_verify_endpoint_checks_values_against_adopted_shape(self):
+        client, _ = self._client_with_tables()
+        contract = {
+            "name": "torque_spec",
+            "tier": "strict",
+            "fields": [
+                {"name": "thread_size", "kind": "text", "required": True},
+                {"name": "torque_min", "kind": "number", "required": True},
+                {"name": "torque_max", "kind": "number", "required": True,
+                 "min_ref": "torque_min"},
+            ],
+        }
+        client.post("/api/adopt", json={"contract": contract})
+
+        response = client.post(
+            "/api/verify-shape",
+            json={
+                "shape": "torque_spec",
+                "text": "TABLE 7-2: 7/16-20 torque 450-500",
+                "values": {"thread_size": "7/16-20", "torque_min": "450",
+                           "torque_max": "500"},
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["verified"] is True
+
+    def test_verify_endpoint_reports_inverted_range_as_not_verified(self):
+        client, _ = self._client_with_tables()
+        contract = {
+            "name": "torque_spec",
+            "tier": "strict",
+            "fields": [
+                {"name": "thread_size", "kind": "text", "required": True},
+                {"name": "torque_min", "kind": "number", "required": True},
+                {"name": "torque_max", "kind": "number", "required": True,
+                 "min_ref": "torque_min"},
+            ],
+        }
+        client.post("/api/adopt", json={"contract": contract})
+
+        response = client.post(
+            "/api/verify-shape",
+            json={
+                "shape": "torque_spec",
+                "text": "TABLE 7-2: 7/16-20 torque 500-450",
+                "values": {"thread_size": "7/16-20", "torque_min": "500",
+                           "torque_max": "450"},
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["verified"] is False
+        assert body["status"] == "mismatch"

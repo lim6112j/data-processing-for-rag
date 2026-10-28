@@ -28,27 +28,32 @@ from rag_ingest.ontology import ChunkRecord
 class ShapeCluster:
     """One recurring shape among quarantined chunks.
 
-    ``pages`` is the number of distinct pages the cluster appears on -- a
-    shape that recurs across pages is corpus structure; one that appears
-    three times on one page is probably one bad table.
+    ``pages`` and ``documents`` are the distinct page/document counts the
+    cluster appears on. A shape recurring across documents is corpus
+    structure; three occurrences on one page of one document is probably one
+    bad table. Both count, because either spread is real recurrence: a
+    three-page run inside one document and the same table in three separate
+    documents are the same signal at corpus scale.
     """
 
     shape: str
     chunks: int
     pages: int
-    sample_text: str
+    documents: int = 1
+    sample_text: str = ""
 
     @property
     def is_candidate(self) -> bool:
         """Recurring enough to be worth the owner's attention.
 
-        Two thresholds, both must hold: several chunks (one stray chunk is
-        noise, not a shape) and more than one page (a single page's layout
-        quirk is a document property, not a corpus shape). The numbers are
-        deliberately low: this flag opens a conversation with the owner, it
-        does not change the pipeline by itself -- the adoption gate does that.
+        Several chunks (one stray chunk is noise) AND more than one origin
+        (page or document -- a single page's layout quirk is a document
+        property, not a corpus shape). The numbers are deliberately low: this
+        flag opens a conversation with the owner, it does not change the
+        pipeline by itself -- the adoption gate does that.
         """
-        return self.chunks >= 3 and self.pages >= 2
+        spread = max(self.pages, self.documents)
+        return self.chunks >= 3 and spread >= 2
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ def discover(quarantined: tuple[ChunkRecord, ...]) -> DiscoveryReport:
     """
     by_shape: Counter[str] = Counter()
     pages: dict[str, set[int]] = {}
+    documents: dict[str, set[str]] = {}
     samples: dict[str, str] = {}
 
     for record in quarantined:
@@ -87,6 +93,7 @@ def discover(quarantined: tuple[ChunkRecord, ...]) -> DiscoveryReport:
         shape = extraction.observed_shape
         by_shape[shape] += 1
         pages.setdefault(shape, set()).add(_first_page(record))
+        documents.setdefault(shape, set()).add(record.doc_id)
         samples.setdefault(shape, record.text.strip()[:120])
 
     unclassified_total = sum(by_shape.values())
@@ -95,6 +102,7 @@ def discover(quarantined: tuple[ChunkRecord, ...]) -> DiscoveryReport:
             shape=shape,
             chunks=count,
             pages=len(pages[shape]),
+            documents=len(documents[shape]),
             sample_text=samples.get(shape, ""),
         )
         for shape, count in by_shape.most_common()
