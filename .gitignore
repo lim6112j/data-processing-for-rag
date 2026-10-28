@@ -24,3 +24,6 @@ demo-*.png
 
 # Screenshots from verification runs
 *.png
+
+# Test corpus (large, re-downloadable; see corpus/README.md)
+corpus/**/*.pdf
