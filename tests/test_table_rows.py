@@ -243,3 +243,81 @@ class TestCellExpansion:
         assert len(observations) == 3  # header + 2 logical rows
         assert observations[1].cells == ("1", "", "10")
         assert observations[2].cells == ("2", "", "20")
+
+
+class TestPerTableClustering:
+    """Two tables on different pages can share column indices but not column
+    meaning -- the Korean corpus found exactly this: an inventory table's
+    stock column (numbers) pooled with an inspection table's memo column
+    (text), and the pooled majority misread both. Column roles must be
+    computed within a table first; tables merge across documents only when
+    their role vectors agree."""
+
+    def _two_tables(self):
+        from rag_ingest.table_rows import RowObservation
+
+        # Table A (chunk 0-40): col2 is numeric stock counts.
+        table_a = [
+            RowObservation(
+                doc_id="kr", page=1, cells=cells,
+                row_text=" | ".join(cells), chunk_start=0, chunk_end=40,
+            )
+            for cells in (
+                ("IV-001", "육안검사기", "150", "30"),
+                ("IV-002", "베어링", "2,400", "500"),
+                ("IV-003", "필터", "44", "10"),
+            )
+        ]
+        # Table B (chunk 50-90): col2 is free-text memos.
+        table_b = [
+            RowObservation(
+                doc_id="kr", page=2, cells=cells,
+                row_text=" | ".join(cells), chunk_start=50, chunk_end=90,
+            )
+            for cells in (
+                ("AN310-4", "PASS", "정상", "검사완료"),
+                ("MS20365-3", "FAIL", "토크부족", "재검사"),
+                ("NAS1223", "HOLD", "재검사대기", "보류"),
+            )
+        ]
+        return table_a + table_b
+
+    def test_tables_with_conflicting_column_roles_stay_separate(self):
+        from rag_ingest.discovery import row_signatures
+
+        rows = self._two_tables()
+        signatures = row_signatures(rows)
+
+        sigs = {signatures[id(r)] for r in rows}
+        assert len(sigs) == 2, f"tables pooled into one cluster: {sigs}"
+
+        # Table A's numeric column keeps its number role -- not diluted by
+        # table B's text in the same column index.
+        table_a_sig = signatures[id(rows[0])]
+        assert "number" in table_a_sig
+        # Table B's memo column keeps its text role.
+        table_b_sig = signatures[id(rows[-1])]
+        assert table_b_sig != table_a_sig
+
+    def test_identical_tables_across_documents_still_merge(self):
+        from rag_ingest.discovery import row_signatures
+        from rag_ingest.table_rows import RowObservation
+
+        doc1 = [
+            RowObservation(
+                doc_id="d1", page=1, cells=cells,
+                row_text=" | ".join(cells), chunk_start=0, chunk_end=40,
+            )
+            for cells in (("A", "1"), ("B", "2"))
+        ]
+        doc2 = [
+            RowObservation(
+                doc_id="d2", page=1, cells=cells,
+                row_text=" | ".join(cells), chunk_start=0, chunk_end=40,
+            )
+            for cells in (("C", "3"), ("D", "4"))
+        ]
+        signatures = row_signatures(doc1 + doc2)
+
+        # Same role vector in both tables -> one cluster, as before.
+        assert signatures[id(doc1[0])] == signatures[id(doc2[0])]

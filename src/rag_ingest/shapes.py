@@ -263,8 +263,16 @@ def adopt_contract(
         claimed = _claims_from_values(candidate_gate, case.values)
         result = candidate_gate.check_contract(contract.name, claimed)
         got = result.status.value
-        expected_status = "grounded" if case.expected == "verified" else "mismatch"
-        if got != expected_status:
+        if case.expected == "verified":
+            expected = {"grounded"}
+        else:
+            # The case states an intent -- the gate MUST refuse -- so any
+            # refusal flavour satisfies it. A number field holding
+            # non-numeric text refuses as 'unverifiable'; an enum violation
+            # as 'mismatch'. Requiring the literal status would block an
+            # adoption whose constraint was proven, just proven differently.
+            expected = {"mismatch", "unverifiable"}
+        if got not in expected:
             failures.append(
                 CaseFailure(
                     case_index=index,

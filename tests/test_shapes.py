@@ -552,3 +552,65 @@ class TestAdoptionGate:
 
         assert cases[0].expected == "verified"
         assert cases[1].expected == "mismatch"
+
+
+class TestMismatchExpectationCoversEveryRefusal:
+    """``expected="mismatch"`` states an intent -- the gate MUST refuse this
+    case -- not a specific refusal flavour. A number field holding
+    non-numeric text is refused as ``unverifiable``; an enum violation as
+    ``mismatch``. Both prove the constraint bites. Requiring the literal
+    status would fail an adoption for the wrong reason: the gate did exactly
+    what the case asked, and the case still failed."""
+
+    def _contract(self) -> ShapeContract:
+        return ShapeContract(
+            name="stock",
+            tier=GateTier.STRICT,
+            fields=(
+                FieldSpec(name="item", kind="text", required=True),
+                FieldSpec(name="stock", kind="number", required=True),
+            ),
+        )
+
+    def _gate(self, text: str):
+        from rag_ingest.grounding import GroundingGate
+        elements = [Element(element_id="e1", kind=ElementKind.PARAGRAPH, page=1, text=text)]
+        raw, _located = RawDocument.from_elements("d", elements)
+        return GroundingGate(raw, shapes=ShapeRegistry.with_builtins())
+
+    def test_unverifiable_counts_as_the_refusal_the_case_demands(self):
+        from rag_ingest.shapes import GoldCaseSpec, adopt_contract
+
+        # Every claimed value is verbatim in the span, including the
+        # non-numeric stock value: the refusal is about kind, not presence.
+        gate = self._gate("IV-002 베어링 재고없음 500")
+        cases = (
+            GoldCaseSpec(
+                values={"item": "IV-002", "stock": "재고없음"},
+                expected="mismatch",
+            ),
+        )
+
+        result = adopt_contract(
+            gate, ShapeRegistry.with_builtins(), self._contract(), cases
+        )
+
+        assert result.registered, f"refusal case blocked adoption: {result.failed_cases}"
+
+    def test_grounded_still_fails_an_expected_mismatch(self):
+        from rag_ingest.shapes import GoldCaseSpec, adopt_contract
+
+        gate = self._gate("IV-002 베어링 500")
+        cases = (
+            GoldCaseSpec(
+                values={"item": "IV-002", "stock": "500"},
+                expected="mismatch",
+            ),
+        )
+
+        result = adopt_contract(
+            gate, ShapeRegistry.with_builtins(), self._contract(), cases
+        )
+
+        assert not result.registered
+        assert result.failed_cases[0].got == "grounded"

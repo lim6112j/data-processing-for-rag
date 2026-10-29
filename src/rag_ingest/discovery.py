@@ -123,23 +123,41 @@ __all__ = ["DiscoveryReport", "ShapeCluster", "discover", "discover_from_rows", 
 def row_signatures(rows: tuple) -> dict[int, str]:
     """Cluster keys for every row: the column-major role sequence.
 
-    Column roles are computed over the whole row set, not per row -- '8-36'
-    and '12-15' have the same cell shape, and only the column's dominant
-    kind tells thread from range. Exposed so the session's proposer keys
-    rows with the exact grammar discovery clustered them by.
+    Column roles are computed per table, then tables with agreeing role
+    vectors merge. Per table first because two tables can share column
+    indices without sharing column meaning -- the Korean corpus found an
+    inventory table's stock column (numbers) pooled with an inspection
+    table's memo column (text), and the pooled majority misread both.
+    Merging on agreement keeps the FAA property that the same recurring
+    shape still clusters across pages and documents; conflicting vectors
+    stay separate because a cluster whose columns disagree about their own
+    role cannot ground a proposal.
     """
     from rag_ingest.propose import classify_cell
 
-    column_kinds: dict[int, Counter] = defaultdict(Counter)
+    def column_roles(group: list) -> dict[int, str]:
+        column_kinds: dict[int, Counter] = defaultdict(Counter)
+        for row in group:
+            for col, cell in enumerate(row.cells):
+                column_kinds[col][classify_cell(cell)] += 1
+        return {
+            col: (kinds.most_common(1)[0][0] if kinds else "empty")
+            for col, kinds in column_kinds.items()
+        }
+
+    groups: dict[tuple, list] = defaultdict(list)
     for row in rows:
-        for col, cell in enumerate(row.cells):
-            column_kinds[col][classify_cell(cell)] += 1
-    roles = {
-        col: (kinds.most_common(1)[0][0] if kinds else "empty")
-        for col, kinds in column_kinds.items()
-    }
+        groups[(row.doc_id, row.chunk_start, row.chunk_end)].append(row)
+
+    signature_by_group: dict[tuple, str] = {}
+    for key, group in groups.items():
+        roles = column_roles(group)
+        width = max(len(row.cells) for row in group)
+        signature_by_group[key] = "row:" + ",".join(
+            roles.get(col, "empty") for col in range(width)
+        )
     return {
-        id(row): "row:" + ",".join(roles.get(col, "empty") for col in range(len(row.cells)))
+        id(row): signature_by_group[(row.doc_id, row.chunk_start, row.chunk_end)]
         for row in rows
     }
 
