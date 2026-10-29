@@ -96,6 +96,13 @@ def page_to_elements(page: Any, page_no: int) -> list[Element]:
         rows = _table_rows(table)
         if not rows:
             continue
+        # A one-column "table" is not a table: pdfplumber's box detector
+        # fences plain text lines (FAA safety-tip lists do this), and there
+        # is no column structure to preserve. Routing it as rows starves
+        # discovery with junk one-cell clusters and steals the block from
+        # the prose path that can quote it. Let the paragraph carry it.
+        if max(len(row) for row in rows) < 2:
+            continue
         box = _bbox_from_plumber(finder[index]) if finder else None
         elements.append(
             Element(
