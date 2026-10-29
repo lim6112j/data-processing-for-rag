@@ -157,3 +157,25 @@ def test_invalid_policy_values_are_rejected():
         ReviewQueue(wip_limit=0)
     with pytest.raises(ValueError):
         ReviewQueue(stale_after_days=0)
+
+
+class TestCloseWithoutLabel:
+    """A question the pipeline later answers itself is not an owner answer:
+    closing it must not inject a synthetic label into the T2 scorecard."""
+
+    def test_close_marks_resolved_without_creating_a_correction(self):
+        from datetime import date
+
+        from rag_ingest.escalation import ReviewItem, ReviewQueue
+
+        queue = ReviewQueue()
+        item = ReviewItem(
+            item_id="d:c:triage", doc_id="d", chunk_id="c",
+            reason=EscalationReason.UNCLASSIFIED,
+            question="?", owner_id="o", created_on=date(2026, 11, 1),
+        )
+        queue.enqueue(item)
+        queue.close("d:c:triage")
+
+        assert queue.open_items() == []
+        assert queue.corrections() == ()  # no synthetic label

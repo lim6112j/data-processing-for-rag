@@ -1500,3 +1500,44 @@ class TestDiscoveryAfterPromotion:
         session.approve_chunk(view.review_items[0].item_id)
 
         assert session.discovery_report() is None
+
+
+class TestStaleItemsCloseWhenChunkVerifies:
+    """An item whose chunk verified in the same ingest is not a question the
+    owner needs to answer -- the adopted contract answered it. The item must
+    close without a label, or the queue nags about answered questions."""
+
+    def test_verified_chunk_item_does_not_stay_open(self, tmp_path):
+        raw, located = RawDocument.from_elements(
+            "d1",
+            [Element(element_id="t1", kind=ElementKind.TABLE, page=1,
+                     text="출고일자 | 출고번호 | 수량 | 납품처\\n"
+                          "2026-10-12 | SH-1001 | 40 | 부산공장\\n"
+                          "2026-10-14 | SH-1002 | 120 | 인천공장\\n"
+                          "2026-10-18 | SH-1003 | 75 | 광주공장",
+                     table_rows=[["출고일자", "출고번호", "수량", "납품처"],
+                                 ["2026-10-12", "SH-1001", "40", "부산공장"],
+                                 ["2026-10-14", "SH-1002", "120", "인천공장"],
+                                 ["2026-10-18", "SH-1003", "75", "광주공장"]])],
+            page_sizes={1: (612.0, 792.0)},
+        )
+        shapes = tmp_path / "shapes.json"
+        import json as _json
+
+        shapes.write_text(_json.dumps([{
+            "name": "shipment_spec", "tier": "strict", "fields": [
+                {"name": "field_0", "kind": "text", "required": False},
+                {"name": "field_1", "kind": "text", "required": False},
+                {"name": "field_2", "kind": "number", "required": True},
+                {"name": "field_3", "kind": "text", "required": False},
+            ],
+        }]))
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor(),
+                              shapes_path=shapes)
+        view = session.ingest(doc_id="d1", filename="a.pdf", parser="test",
+                              raw=raw, elements=located)
+
+        # The contract verified the table: its "Unrecognised content?" item
+        # is answered by the pipeline and must not stay open.
+        assert view.verified_count >= 1
+        assert session.open_items() == []

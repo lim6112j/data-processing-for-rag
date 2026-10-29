@@ -186,6 +186,22 @@ class ReviewQueue:
         # Tie-break on item_id so ordering is deterministic in tests.
         return max(open_items, key=lambda item: (item.priority, item.item_id))
 
+    def close(self, item_id: str) -> bool:
+        """Close an item the pipeline answered itself -- no label, no reviewer.
+
+        A question the gate later answered ("this chunk now grounds under the
+        adopted contract") is not an owner answer: recording one would inject
+        a synthetic label into the T2 scorecard and flatter precision with
+        agreement nobody gave. The item leaves the queue; the scorecard never
+        hears about it. Returns False when the item is unknown or already
+        resolved -- closing is idempotent by design.
+        """
+        item = self._items.get(item_id)
+        if item is None or item.resolved:
+            return False
+        self._items[item_id] = item.model_copy(update={"resolved": True})
+        return True
+
     def resolve(self, item_id: str, correction: Correction) -> None:
         """Record a reviewer's answer.
 

@@ -214,6 +214,16 @@ class DemoSession:
         # and accept nothing.
         for item in outcome.review_items:
             self.queue.enqueue(item)
+        # A question the pipeline answered during this very ingest is not an
+        # owner question: a chunk verified through an adopted contract (row
+        # verification, promotion) leaves its "Unrecognised content?" item
+        # open forever otherwise. Close it without a label -- nobody answered
+        # it, the gate did, and the scorecard must not count that as
+        # agreement.
+        verified_ids = {c.chunk_id for c in outcome.verified_chunks}
+        for open_item in self.queue.open_items():
+            if open_item.doc_id == doc_id and open_item.chunk_id in verified_ids:
+                self.queue.close(open_item.item_id)
 
         chunks = pipeline._chunker.chunk(raw.doc_id, list(elements))
         self.documents[doc_id] = raw
