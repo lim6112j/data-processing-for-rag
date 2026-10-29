@@ -182,6 +182,56 @@ def page_count(path: str) -> int:
         return len(pdf.pages)
 
 
+def iter_pdf_slices(
+    path: str,
+    *,
+    doc_id: str,
+    batch: int,
+    render_images: bool = True,
+    image_resolution: int = 144,
+):
+    """Yield ``(start, end, raw, elements)`` for consecutive page batches.
+
+    Auto-slicing used to re-open the PDF and re-pay per-call warmup for
+    every slice -- 33 slices over a 646-page manual spent more time in
+    overhead than in pages. One open, one walk, a flush at every batch
+    boundary: total parse cost is the pages themselves, and memory holds one
+    batch's elements and images, never the whole document.
+    """
+    if batch < 1:
+        raise ValueError("batch must be >= 1")
+    try:
+        import pdfplumber
+    except ImportError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("pdfplumber adapter needs 'pdfplumber': uv add pdfplumber") from exc
+
+    with pdfplumber.open(path) as pdf:
+        elements: list[Element] = []
+        page_images: dict[int, bytes] = {}
+        page_sizes: dict[int, tuple[float, float]] = {}
+        batch_start = 1
+
+        def flush(batch_end: int):
+            raw, located = RawDocument.from_elements(
+                f"{doc_id}", elements, page_images=page_images, page_sizes=page_sizes
+            )
+            return batch_start, batch_end, raw, located
+
+        for page_no, page in enumerate(pdf.pages, start=1):
+            elements.extend(page_to_elements(page, page_no))
+            page_sizes[page_no] = (float(page.width), float(page.height))
+            if render_images:
+                png = _render_page(page, resolution=image_resolution)
+                if png is not None:
+                    page_images[page_no] = png
+            if page_no % batch == 0 or page_no == len(pdf.pages):
+                yield flush(page_no)
+                elements = []
+                page_images = {}
+                page_sizes = {}
+                batch_start = page_no + 1
+
+
 def _page_slice(
     all_pages: list[Any],
     pages: tuple[int, int] | None,

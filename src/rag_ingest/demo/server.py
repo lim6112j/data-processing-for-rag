@@ -184,23 +184,21 @@ async def ingest_auto(
         temp_path = Path(handle.name)
 
     try:
-        from rag_ingest.adapters.pdfplumber import page_count
-        from rag_ingest.demo.parsing import parse_pdf
+        from rag_ingest.adapters.pdfplumber import iter_pdf_slices
 
-        total_pages = page_count(str(temp_path))
+        # One open, one walk: slices flush from a single pass instead of
+        # re-opening and re-warming the parser per batch. parser=pdfplumber
+        # is the only slice-capable path; docling parses whole anyway.
         slices = []
-        for start in range(1, total_pages + 1, batch):
-            end = min(start + batch - 1, total_pages)
-            raw, elements, resolved = parse_pdf(
-                temp_path,
-                doc_id=f"{doc_id}:part{start:04d}-{end:04d}",
-                parser=parser,
-                pages=(start, end),
-            )
+        for start, end, raw, elements in iter_pdf_slices(
+            str(temp_path), doc_id=doc_id, batch=batch, render_images=False
+        ):
+            part_id = f"{doc_id}:part{start:04d}-{end:04d}"
+            raw = raw.model_copy(update={"doc_id": part_id})
             summary = _run_ingest(
-                doc_id=f"{doc_id}:part{start:04d}-{end:04d}",
+                doc_id=part_id,
                 filename=file.filename or doc_id,
-                parser=resolved,
+                parser="pdfplumber",
                 raw=raw,
                 elements=elements,
             )
@@ -212,6 +210,7 @@ async def ingest_auto(
                 "review_items": len(summary["review_items"]),
                 "dropped": summary["review_queue_dropped"],
             })
+        total_pages = max((s["page_end"] for s in slices), default=0)
         return {
             "doc_id": doc_id,
             "total_pages": total_pages,

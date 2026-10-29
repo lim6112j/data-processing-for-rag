@@ -66,3 +66,26 @@ class TestPageCount:
         path = tmp_path / "doc.pdf"
         _make_multipage_pdf(path, pages=7)
         assert page_count(str(path)) == 7
+
+
+class TestIterSlices:
+    """Auto-slice opens the document once and flushes batches as it walks
+    the pages: N slices must not cost N opens, and memory must hold one
+    batch, not the whole document."""
+
+    def test_single_open_yields_all_batches(self, tmp_path):
+        from rag_ingest.adapters.pdfplumber import iter_pdf_slices
+
+        path = tmp_path / "doc.pdf"
+        _make_multipage_pdf(path, pages=5)
+        slices = list(iter_pdf_slices(str(path), doc_id="d", batch=2,
+                                      render_images=False))
+
+        assert [(s, e) for s, e, _, _ in slices] == [(1, 2), (3, 4), (5, 5)]
+        all_marker_pages = []
+        for _, _, raw, elements in slices:
+            all_marker_pages.extend(
+                e.page for e in elements if "PAGE-MARKER" in e.text
+            )
+            assert {pg.page_no for pg in raw.pages} <= {1, 2, 3, 4, 5}
+        assert sorted(all_marker_pages) == [1, 2, 3, 4, 5]
