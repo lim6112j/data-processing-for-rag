@@ -51,3 +51,28 @@ class TestExportVerified:
         ])
         keys = [(r.doc_id, r.chunk_id) for r in rows]
         assert keys == sorted(keys)
+
+
+class TestApprovalInExport:
+    """Owner-approved chunks ride into export with their history, so the
+    downstream store can tell machine-verified from owner-approved instead
+    of mixing the two silently."""
+
+    def test_row_carries_approval_when_present(self):
+        from datetime import date
+
+        from rag_ingest.promotion import Approval
+
+        record = _record("본 대장은 기록한다.")
+        rows = export_verified(
+            [record],
+            approvals={"c1": Approval(reviewer="owner-1", approved_on=date(2026, 11, 1))},
+        )
+        line = json.loads(rows[0].to_jsonl())
+        assert line["approval"] == {
+            "reviewer": "owner-1", "approved_on": "2026-11-01",
+        }
+
+    def test_machine_verified_rows_have_no_approval_key(self):
+        rows = export_verified([_record("no approval here")])
+        assert "approval" not in json.loads(rows[0].to_jsonl())

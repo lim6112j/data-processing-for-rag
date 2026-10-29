@@ -1406,3 +1406,67 @@ class TestExportEndpoint:
         assert lines
         assert all(line["export_format"] == "rag_export_v1" for line in lines)
         assert all(line["doc_id"] == "d1" for line in lines)
+
+
+class TestOwnerApprovalPromotion:
+    """Approving a review item promotes its chunk out of quarantine -- but
+    only through the gate. The demo endpoint is the loop closer: the owner
+    answers, the chunk enters retrieval, the next export carries it."""
+
+    def test_approving_unclassified_chunk_promotes_it_as_quote(self):
+        raw, elements = _source("본 대장은 자재창고의 월간 재고 현황을 기록한다. " * 8)
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        view = session.ingest(doc_id="d1", filename="a.pdf", parser="test",
+                              raw=raw, elements=elements)
+        item = view.review_items[0]
+
+        result = session.approve_chunk(item.item_id)
+
+        assert result.refusal is None
+        fresh = session.views["d1"]
+        assert fresh.verified_count == view.verified_count + 1
+        assert fresh.quarantined_count == view.quarantined_count - 1
+        # The item is answered: the queue no longer holds it.
+        assert all(i.item_id != item.item_id for i in session.open_items())
+
+    def test_approved_chunks_carry_their_approval_into_export(self):
+        raw, elements = _source("본 대장은 자재창고의 월간 재고 현황을 기록한다. " * 8)
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        view = session.ingest(doc_id="d1", filename="a.pdf", parser="test",
+                              raw=raw, elements=elements)
+        session.approve_chunk(view.review_items[0].item_id)
+
+        rows = session.export_rows()
+
+        approved = [r for r in rows if r.approval is not None]
+        assert approved
+        assert approved[0].approval.reviewer == "demo-owner"
+
+
+class TestApproveEndpoint:
+    def test_approve_endpoint_promotes_and_reflects_in_the_view(self):
+        from fastapi.testclient import TestClient
+
+        import rag_ingest.demo.server as server_mod
+
+        raw, elements = _source("본 대장은 자재창고의 월간 재고 현황을 기록한다. " * 8)
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        view = session.ingest(doc_id="d1", filename="a.pdf", parser="test",
+                              raw=raw, elements=elements)
+        item = view.review_items[0]
+
+        original, server_mod._session = server_mod._session, session
+        try:
+            response = TestClient(server_mod.app).post(
+                f"/api/approve/{item.item_id}"
+            )
+            export = TestClient(server_mod.app).get("/api/export")
+        finally:
+            server_mod._session = original
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["promoted"] is True
+        assert export.status_code == 200
+        lines = [json.loads(line) for line in export.text.splitlines() if line]
+        assert any(r.get("approval") for r in lines)

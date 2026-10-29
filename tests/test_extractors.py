@@ -345,3 +345,27 @@ class TestLineItemCollection:
         assert lines[0].amount.value == "100.00"
 
 
+
+
+class TestLayeredSkipsTables:
+    """A table quoted as prose is a table whose structure was destroyed: row
+    discovery and row routing both starve, and the table enters retrieval as
+    if its shape were known. The prose fallback exists for prose -- a
+    tabular chunk stays unclassified so it can become a question."""
+
+    def test_unclassified_table_is_not_quoted(self):
+        from rag_ingest.chunking import Chunk, ChunkKind, ChunkSegment, HeadingPath
+        from rag_ingest.extractors import LayeredExtractor
+
+        chunk = Chunk(
+            chunk_id="d:t1", doc_id="d", kind=ChunkKind.TABLE,
+            text="부서 | 점검항목 | 상태 | 비고",
+            heading_path=HeadingPath(), page_start=1, page_end=1,
+            element_ids=("t1",), estimated_tokens=10,
+            segments=(ChunkSegment(
+                element_id="t1", page=1, chunk_start=0, chunk_end=18,
+                raw_start=0, raw_end=18,
+            ),),
+        )
+        result = LayeredExtractor(primary=TemplateExtractor()).extract(chunk)
+        assert type(result).__name__ == "Unclassified", type(result).__name__

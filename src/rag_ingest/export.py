@@ -15,6 +15,7 @@ import json
 from dataclasses import dataclass
 
 from rag_ingest.ontology import ChunkRecord, GateTier
+from rag_ingest.promotion import Approval
 
 #: Bumped when the row shape changes; consumers key their validation on it.
 EXPORT_FORMAT = "rag_export_v1"
@@ -28,22 +29,33 @@ class ExportRow:
     doc_id: str
     text: str
     gate_tier: GateTier
+    approval: Approval | None = None
 
     def to_jsonl(self) -> str:
-        """One JSON line carrying identity, text, and the tier that admitted it."""
-        return json.dumps(
-            {
-                "export_format": EXPORT_FORMAT,
-                "chunk_id": self.chunk_id,
-                "doc_id": self.doc_id,
-                "text": self.text,
-                "gate_tier": self.gate_tier.value,
-            },
-            ensure_ascii=False,
-        )
+        """One JSON line carrying identity, text, and the tier that admitted it.
+
+        The approval key appears only when the chunk's verification involved
+        an owner decision: absence means machine-verified, not "approval was
+        lost somewhere" -- the two knowledge grades stay distinguishable."""
+        payload: dict = {
+            "export_format": EXPORT_FORMAT,
+            "chunk_id": self.chunk_id,
+            "doc_id": self.doc_id,
+            "text": self.text,
+            "gate_tier": self.gate_tier.value,
+        }
+        if self.approval is not None:
+            payload["approval"] = {
+                "reviewer": self.approval.reviewer,
+                "approved_on": self.approval.approved_on.isoformat(),
+            }
+        return json.dumps(payload, ensure_ascii=False)
 
 
-def export_verified(records: list[ChunkRecord] | tuple[ChunkRecord, ...]) -> tuple[ExportRow, ...]:
+def export_verified(
+    records: list[ChunkRecord] | tuple[ChunkRecord, ...],
+    approvals: dict[str, Approval] | None = None,
+) -> tuple[ExportRow, ...]:
     """Project verified records into export rows, sorted for a stable push order.
 
     Unverified records vanish here rather than raising: a bulk caller mixing
@@ -60,6 +72,17 @@ def export_verified(records: list[ChunkRecord] | tuple[ChunkRecord, ...]) -> tup
         for r in records
         if r.verified
     ]
+    if approvals:
+        rows = [
+            ExportRow(
+                chunk_id=row.chunk_id,
+                doc_id=row.doc_id,
+                text=row.text,
+                gate_tier=row.gate_tier,
+                approval=approvals.get(row.chunk_id),
+            )
+            for row in rows
+        ]
     rows.sort(key=lambda row: (row.doc_id, row.chunk_id))
     return tuple(rows)
 

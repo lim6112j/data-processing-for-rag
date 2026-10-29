@@ -136,6 +136,12 @@ class DemoSession:
 
     queue: ReviewQueue = field(default_factory=ReviewQueue)
     documents: dict[str, RawDocument] = field(default_factory=dict)
+    #: The located elements behind each document, kept so owner approval can
+    #: re-derive a chunk's quote from the source it claims to cite.
+    located: dict[str, list] = field(default_factory=dict)
+    #: The chunks behind each document, kept so approval can re-render the
+    #: view without re-chunking.
+    _chunks: dict[str, list] = field(default_factory=dict)
     chunk_index: dict[str, Chunk] = field(default_factory=dict)
     views: dict[str, IngestView] = field(default_factory=dict)
     _breaker: T2CircuitBreaker | None = None
@@ -143,6 +149,8 @@ class DemoSession:
     #: chunks after the fact. The view records decisions; the outcome holds
     #: the records discovery reads.
     outcomes: dict[str, IngestOutcome] = field(default_factory=dict)
+    #: Owner approvals by chunk id -- the promotion history export attaches.
+    _approvals: dict = field(default_factory=dict)
     #: Adopted contracts are persisted here (JSON of ``to_definition`` payloads)
     #: and reloaded on construction -- adoption must survive a restart.
     shapes_path: Path | None = None
@@ -209,10 +217,18 @@ class DemoSession:
 
         chunks = pipeline._chunker.chunk(raw.doc_id, list(elements))
         self.documents[doc_id] = raw
+        self.located[doc_id] = list(elements)
         self.chunk_index.update({chunk.chunk_id: chunk for chunk in chunks})
+        self._chunks[doc_id] = list(chunks)
 
         self.outcomes[doc_id] = outcome
-        view = IngestView(
+        view = self._build_view(doc_id=doc_id, filename=filename, parser=parser,
+                                raw=raw, outcome=outcome, chunks=chunks)
+        self.views[doc_id] = view
+        return view
+
+    def _build_view(self, *, doc_id, filename, parser, raw, outcome, chunks):
+        return IngestView(
             doc_id=doc_id,
             filename=filename,
             parser=parser,
@@ -234,8 +250,6 @@ class DemoSession:
                 (v.status, v.row_text) for v in outcome.row_verifications
             ),
         )
-        self.views[doc_id] = view
-        return view
 
     def _force_ambiguous(self, pipeline, raw, elements) -> IngestOutcome:
         """Run the pipeline with every element demoted to STRUCTURE_UNKNOWN.
@@ -499,6 +513,71 @@ class DemoSession:
         if self._breaker is not None:
             feed_breaker(card, self._breaker)
         return card
+
+    def approve_chunk(self, item_id: str, reviewer_id: str = "demo-owner"):
+        """Approve a review item: the owner says the chunk is right.
+
+        The gate still re-checks the chunk's claim against the source -- the
+        owner's authority is about meaning, the machine's is about the
+        citation. An approval the gate refuses stays quarantined and returns
+        the refusal rather than pretending to succeed. The answered item
+        leaves the queue either way: the owner has spoken on it."""
+        from rag_ingest.grounding import GroundingGate
+        from rag_ingest.promotion import Approval, promote_chunk
+
+        item = next((i for i in self.queue.open_items() if i.item_id == item_id), None)
+        if item is None:
+            raise KeyError(f"no open review item {item_id}")
+
+        outcome = self.outcomes.get(item.doc_id)
+        raw = self.documents.get(item.doc_id)
+        if outcome is None or raw is None:
+            raise KeyError(f"no ingest outcome for {item.doc_id}")
+
+        gate = GroundingGate(raw, shapes=self.registry())
+        result = promote_chunk(
+            outcome,
+            item.chunk_id,
+            Approval(reviewer=reviewer_id, approved_on=self.today),
+            gate=gate,
+            raw=raw,
+            elements=self.located.get(item.doc_id, []),
+        )
+        self.queue.resolve(
+            item_id,
+            Correction(
+                doc_id=item.doc_id,
+                chunk_id=item.chunk_id,
+                field="content",
+                validator_error=item.reason.value,
+                before=item.adjudicated_choice,
+                after="approved",
+                reviewer_id=reviewer_id,
+                reviewer_role=ReviewerRole.OWNER,
+                captured_on=self.today,
+            ),
+        )
+        if result.outcome is not None:
+            self.outcomes[item.doc_id] = result.outcome
+            self._approvals[item.chunk_id] = result.approval
+            doc = self.views[item.doc_id]
+            self.views[item.doc_id] = self._build_view(
+                doc_id=item.doc_id, filename=doc.filename, parser=doc.parser,
+                raw=raw, outcome=result.outcome,
+                chunks=self._chunks.get(item.doc_id, []),
+            )
+        return result
+
+    def export_rows(self):
+        """The session's verified chunks as export rows, approvals attached."""
+        from rag_ingest.export import export_verified
+
+        records = [
+            record
+            for outcome in self.outcomes.values()
+            for record in outcome.verified_chunks
+        ]
+        return export_verified(records, approvals=dict(self._approvals))
 
     def scorecard(self) -> T2ScoreCard:
         return score(list(self.queue.corrections()), self.queue.items_by_chunk())

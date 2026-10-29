@@ -377,6 +377,13 @@ class LayeredExtractor:
             return first
         if first.observed_shape == "invoice_header_unparseable":
             return first
+        if first.observed_shape == "tabular":
+            # A table quoted as prose is a table whose structure was
+            # destroyed: row discovery and row routing both starve, and the
+            # chunk enters retrieval as if its shape were known. Prose is the
+            # fallback for prose -- a tabular chunk stays unclassified so it
+            # can become a question (and, once a contract is adopted, rows).
+            return first
         second = self._fallback.extract(chunk)
         return first if second is None else second
 

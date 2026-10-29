@@ -199,6 +199,28 @@ class VerifyShapeRequest(BaseModel):
     values: dict[str, str]
 
 
+@app.post("/api/approve/{item_id:path}")
+def approve_item(item_id: str) -> dict:
+    """Owner approval of a review item: the loop closer.
+
+    The gate still re-checks the chunk against its source -- approval is
+    about meaning, citation is the machine's. A refused approval stays
+    quarantined and is reported as such; pretending it succeeded would turn
+    the owner's sign-off into a new fabrication channel."""
+    try:
+        result = _session.approve_chunk(item_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "promoted": result.refusal is None,
+        "refusal": (
+            {"reason": result.refusal.reason, "detail": result.refusal.detail}
+            if result.refusal is not None
+            else None
+        ),
+    }
+
+
 @app.get("/api/export")
 def export_verified_jsonl() -> Response:
     """The session's verified chunks as JSONL for a downstream retrieval store.
@@ -207,14 +229,7 @@ def export_verified_jsonl() -> Response:
     here no matter how the request is shaped, because export reads only
     ``verified_chunks`` from the pipeline's outcomes. The text/plain response
     is one JSON object per line -- the format the push script round-trips."""
-    from rag_ingest.export import export_verified
-
-    records = [
-        record
-        for outcome in _session.outcomes.values()
-        for record in outcome.verified_chunks
-    ]
-    body = "\n".join(row.to_jsonl() for row in export_verified(records))
+    body = "\n".join(row.to_jsonl() for row in _session.export_rows())
     return Response(content=body + ("\n" if body else ""), media_type="text/plain")
 
 
