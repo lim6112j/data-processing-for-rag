@@ -389,10 +389,16 @@ function renderDiscovery(report) {
             <button onclick="proposeShape('${esc(c.shape)}')">Define this shape →</button>
           </div>`;
         }
+        // A cluster exists only because its chunks are quarantined, so "already
+        // handled" was never true. Non-candidate means below the recurrence
+        // threshold -- a dead end for a one-off document unless the owner can
+        // still define it, so the button stays and the status says why.
         return `
           <div class="card">
-            <div style="font-weight:600;margin-bottom:4px">${esc(c.shape)} — ${c.chunks} chunks</div>
-            <div class="meta">Already handled by an existing shape. No action needed.</div>
+            <div style="font-weight:600;margin-bottom:4px">${esc(c.shape)} — ${c.chunks} chunks, ${c.pages} pages, ${c.documents} document${c.documents === 1 ? '' : 's'}</div>
+            <div class="chunk-text" style="margin-bottom:8px">${esc(c.sample_text)}</div>
+            <div class="meta">Seen once — below the recurrence threshold (${c.chunks} chunks / ${c.pages} pages / ${c.documents} document${c.documents === 1 ? '' : 's'}, need ≥3 chunks across ≥2 pages or documents). Define it anyway if this shape will recur in future documents.</div>
+            <button onclick="proposeShape('${esc(c.shape)}')">Define this shape →</button>
           </div>`;
       }).join('');
 }
