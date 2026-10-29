@@ -22,7 +22,7 @@ from rag_ingest.chunking import Chunk, Chunker
 from rag_ingest.circuit import BreakerStatus, T2CircuitBreaker
 from rag_ingest.docmodel import BBox, Element, ElementKind, ProvenanceRef, RawDocument
 from rag_ingest.escalation import Correction, ReviewerRole, ReviewItem, ReviewQueue
-from rag_ingest.extractors import TemplateExtractor
+from rag_ingest.extractors import LayeredExtractor
 from rag_ingest.pipeline import IngestOutcome, IngestPipeline
 from rag_ingest.scoring import T2ScoreCard, feed_breaker, score
 
@@ -112,7 +112,10 @@ class DemoSession:
     # exists to show a verdict per region -- green entered retrieval, red withheld.
     # Admitting every prose chunk as a verbatim quote would paint the whole page
     # green and demonstrate nothing. Use the corpus run to exercise the LENIENT tier.
-    extractor: object = field(default_factory=TemplateExtractor)
+    #: Layered: typed extraction first, verbatim prose fallback. Prose is
+    #: quotable, not unknowable -- without the fallback every prose chunk
+    #: stays unclassified and the LENIENT tier is unreachable in the demo.
+    extractor: object = field(default_factory=LayeredExtractor)
     adjudicator: object | None = None
     producer: object | None = None
     today: date = field(default_factory=date.today)

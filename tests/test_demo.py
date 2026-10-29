@@ -15,9 +15,19 @@ from helpers.pdf_fixture import make_pdf
 
 from rag_ingest.demo.session import DemoSession
 from rag_ingest.docmodel import Element, ElementKind, RawDocument
+from rag_ingest.extractors import TemplateExtractor
 from rag_ingest.grounding import GroundingStatus
 
 TODAY = date(2026, 10, 25)
+
+
+def _quarantine_session():
+    """A session with NO prose fallback: single-line text chunks stay
+    unclassified and quarantine, which is what the review-flow tests need
+    a steady supply of. The production default layers ProseExtractor in --
+    prose is quotable -- so tests that specifically exercise the review
+    loop ask for this narrower extractor explicitly."""
+    return DemoSession(today=TODAY, extractor=TemplateExtractor())
 
 
 def _source(text: str, doc_id: str = "d1"):
@@ -56,7 +66,7 @@ class TestSessionIngest:
         # A view that lists items the queue does not hold would look alive and
         # accept nothing -- this was a real bug.
         raw, elements = _source("A haiku about procurement")
-        session = DemoSession(today=TODAY)
+        session = _quarantine_session()
 
         view = session.ingest(
             doc_id="d1", filename="a.pdf", parser="test", raw=raw, elements=elements
@@ -80,7 +90,7 @@ class TestSessionIngest:
 class TestReviewLoop:
     def _ingested(self):
         raw, elements = _source("A haiku about procurement")
-        session = DemoSession(today=TODAY)
+        session = _quarantine_session()
         session.ingest(
             doc_id="d1", filename="a.pdf", parser="test", raw=raw, elements=elements
         )
@@ -144,7 +154,7 @@ class TestHttpContract:
         from rag_ingest.demo import server
 
         # Fresh session per test: the module-level one is shared state.
-        server._session = DemoSession(today=TODAY)
+        server._session = _quarantine_session()
         return TestClient(server.app)
 
     def test_index_serves_html(self, client):
@@ -280,6 +290,7 @@ class TestT2DemoSwitch:
 
         raw, elements = _source("Item | Amount")
         session = DemoSession(
+            extractor=TemplateExtractor(),
             adjudicator=ScriptedAdjudicator(),
             force_structure_ambiguous=True,
             today=TODAY,
@@ -298,6 +309,7 @@ class TestT2DemoSwitch:
 
         raw, elements = _source("Item | Amount\nWidget | 1200")
         session = DemoSession(
+            extractor=TemplateExtractor(),
             adjudicator=ScriptedAdjudicator(prefer="pdfplumber"),
             producer=DoubleReadingProducer(),
             force_structure_ambiguous=True,
@@ -332,6 +344,7 @@ class TestT2DemoSwitch:
 
         raw, elements = _source("Item | Amount")
         session = DemoSession(
+            extractor=TemplateExtractor(),
             adjudicator=ScriptedAdjudicator(always_abstain=True),
             producer=DoubleReadingProducer(),
             force_structure_ambiguous=True,
@@ -395,6 +408,7 @@ class TestReingest:
         from rag_ingest.demo.producers import DoubleReadingProducer
 
         session = DemoSession(
+            extractor=TemplateExtractor(),
             adjudicator=ScriptedAdjudicator(prefer="pdfplumber"),
             producer=DoubleReadingProducer(),
             force_structure_ambiguous=True,
@@ -522,7 +536,7 @@ class TestLabelsAreVisible:
     def client(self):
         from rag_ingest.demo import server
 
-        server._session = DemoSession(today=TODAY)
+        server._session = _quarantine_session()
         return TestClient(server.app)
 
     def _submit(self, client, answer="1234.56"):
@@ -592,9 +606,8 @@ class TestShapeDiscoveryFlow:
     and the pipeline verifies the next chunk against it -- no restart."""
 
     def _session(self):
-        from rag_ingest.demo.session import DemoSession
 
-        return DemoSession(today=TODAY)
+        return _quarantine_session()
 
     def _ingest_tables(self, session, doc_id="tables"):
         # Three documents, each one oversized tabular chunk on its own page --
@@ -1150,9 +1163,8 @@ class TestRowDiscoveryInSession:
                        raw=raw, elements=located)
 
     def test_discovery_report_includes_row_clusters(self):
-        from rag_ingest.demo.session import DemoSession
 
-        session = DemoSession(today=TODAY)
+        session = _quarantine_session()
         self._ingest_real_tables(session)
 
         report = session.discovery_report()
@@ -1162,9 +1174,8 @@ class TestRowDiscoveryInSession:
         assert row_clusters, "row observations never reached discovery"
 
     def test_row_cluster_is_proposable_from_row_observations(self):
-        from rag_ingest.demo.session import DemoSession
 
-        session = DemoSession(today=TODAY)
+        session = _quarantine_session()
         self._ingest_real_tables(session)
 
         report = session.discovery_report()
@@ -1207,7 +1218,11 @@ class TestLlmProposerFallback:
             def __init__(self, payload):
                 self.chat = SimpleNamespace(completions=_FakeCompletions(payload))
 
-        session = DemoSession(today=TODAY, llm_proposer=_FakeClient(json.dumps(llm_proposal)))
+        session = DemoSession(
+            today=TODAY,
+            extractor=TemplateExtractor(),
+            llm_proposer=_FakeClient(json.dumps(llm_proposal)),
+        )
         return session
 
     def _ingest_all_text_table(self, session):
@@ -1284,7 +1299,7 @@ class TestRowVerificationInView:
     def test_verified_rows_appear_in_the_view(self):
         from rag_ingest.shapes import FieldSpec, GoldCaseSpec, ShapeContract
 
-        session = DemoSession(today=TODAY)
+        session = _quarantine_session()
         rows = (
             ("부품코드", "상태", "판정", "메모"),
             ("AN310-4", "PASS", "합격", "정상"),
@@ -1340,3 +1355,25 @@ class TestRowVerificationInView:
         # The header row is refused: read as data, its status cell is not in
         # the closed set. Named, not silent.
         assert any(s2 == "mismatch" and "부품코드" in t for s2, t in view.row_verifications)
+
+
+class TestProseChunksVerifyByDefault:
+    """A prose chunk is quotable, not unknowable: ProseExtractor quotes it
+    verbatim and the LENIENT gate checks quotation fidelity. The demo session
+    shipped with only TemplateExtractor, so every prose chunk stayed
+    unclassified -- withheld forever, a question nobody needed to answer.
+    The layered extractor is the default the demo should always have had."""
+
+    def test_korean_prose_chunk_verifies_without_any_adoption(self):
+        session = DemoSession(today=TODAY)
+        raw, located = RawDocument.from_elements(
+            "d",
+            [Element(element_id="p1", kind=ElementKind.PARAGRAPH, page=1,
+                     text="본 대장은 자재창고의 월간 재고 현황을 기록한다. " * 8)],
+        )
+        view = session.ingest(doc_id="d", filename="d.pdf", parser="test",
+                              raw=raw, elements=located)
+
+        assert view.verified_count >= 1, [
+            (c.verified, c.text[:40]) for c in view.chunks
+        ]
