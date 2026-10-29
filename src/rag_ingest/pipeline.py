@@ -41,6 +41,8 @@ from rag_ingest.ontology import (
     Extraction,
     GateTier,
 )
+from rag_ingest.row_verify import RowVerification, verify_rows
+from rag_ingest.shapes import ShapeRegistry
 from rag_ingest.table_rows import RowObservation
 from rag_ingest.table_rows import row_observations as _split_rows
 from rag_ingest.tiering import Tier, TierDecision, select_tier
@@ -61,6 +63,10 @@ class IngestOutcome:
     #: these so a 14-row table is 14 candidate rows, not one blob -- row
     #: recurrence is the signal a shape declaration should be asked about.
     row_observations: tuple[RowObservation, ...] = ()
+    #: Rows verified against adopted row contracts at ingest time. Present
+    #: only where a contract matched; unmatched rows stay discovery
+    #: observations, which is their honest state.
+    row_verifications: tuple[RowVerification, ...] = ()
 
 
 class Adjudicator:
@@ -95,6 +101,7 @@ class IngestPipeline:
         today: date | None = None,
         adjudicator: Adjudicator | None = None,
         producer: CandidateProducer | None = None,
+        registry: ShapeRegistry | None = None,
     ) -> None:
         self._queue = queue
         self._extractor = extractor
@@ -105,6 +112,9 @@ class IngestPipeline:
         self._adjudicator = adjudicator or Adjudicator()
         # Default produces a single reading, so no disagreement reaches T2.
         self._producer: CandidateProducer = producer or NullProducer()
+        # Adopted contracts; None means builtins only -- nothing adopted, so
+        # row verification has nothing to apply and is skipped entirely.
+        self._registry = registry
 
     def ingest(
         self,
@@ -132,7 +142,12 @@ class IngestPipeline:
                 extractable.append(element)
 
         chunks = self._chunker.chunk(raw.doc_id, extractable)
-        gate = GroundingGate(raw)
+        # The gate carries the adopted contracts too: an adopted row shape
+        # must be able to bite at ingest time, and one registry prevents the
+        # adoption path and the verification path from drifting.
+        gate = GroundingGate(
+            raw, shapes=self._registry or ShapeRegistry.with_builtins()
+        )
 
         verified: list[ChunkRecord] = []
         quarantined: list[ChunkRecord] = []
@@ -212,6 +227,7 @@ class IngestPipeline:
             )
 
         row_observations = self._route_table_rows(quarantined, chunks)
+        row_verifications = self._verify_rows(quarantined, chunks, raw, gate)
         return IngestOutcome(
             doc_id=raw.doc_id,
             verified_chunks=tuple(verified),
@@ -220,6 +236,7 @@ class IngestPipeline:
             tier_decisions=tuple(tier_decisions),
             adjudications=tuple(adjudications),
             row_observations=row_observations,
+            row_verifications=row_verifications,
         )
 
     def _route_table_rows(
@@ -238,6 +255,34 @@ class IngestPipeline:
             if chunk.chunk_id in quarantined_ids and chunk.kind.value == "table":
                 routed.extend(_split_rows(chunk, self._elements_by_chunk(chunk)))
         return tuple(routed)
+
+    def _verify_rows(
+        self,
+        quarantined: list[ChunkRecord],
+        chunks: list[Chunk],
+        raw: RawDocument,
+        gate: GroundingGate,
+    ) -> tuple[RowVerification, ...]:
+        """Verify quarantined table rows against adopted row contracts.
+
+        The same quarantine that feeds discovery also feeds verification: a
+        chunk whose shape nobody has adopted stays a question, and one whose
+        shape HAS been adopted gets its rows checked by the standard gate.
+        The gate carries the caller's registry, so no second registry exists
+        to drift.
+        """
+        if self._registry is None:
+            return ()
+        quarantined_ids = {r.chunk_id for r in quarantined}
+        verifications: list[RowVerification] = []
+        for chunk in chunks:
+            if chunk.chunk_id not in quarantined_ids or chunk.kind.value != "table":
+                continue
+            rows = _split_rows(chunk, self._elements_by_chunk(chunk))
+            if not rows:
+                continue
+            verifications.extend(verify_rows(rows, chunk, gate, self._registry))
+        return tuple(verifications)
 
     def _elements_by_chunk(self, chunk: Chunk) -> list[Element]:
         """The chunk's own elements, with resolved offsets, in order."""

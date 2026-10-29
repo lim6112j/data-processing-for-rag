@@ -87,9 +87,10 @@ parsers*; it never sees grounding failures and never verifies anything.
   verified against cited rows, adoption gate unchanged)
 - **T2 repurposing**: OpenRouter tier could resolve data-quality claims
   (structural disagreements between parsers) — invariant #1 still holds
-- **Real Korean business corpus**: first measurement done
-  (`corpus/korean/` — born-digital inventory/inspection PDF via reportlab).
-  Found and fixed: cross-table column pooling in `row_signatures` (roles now
-  computed per table chunk, merged only when role vectors agree). Korean
-  tables route and adopt end-to-end; header-only clusters stay non-candidates
-  (single page/doc spread). Larger multi-doc Korean corpus still unmeasured
+- **Real Korean business corpus**: measured multi-doc
+  (`corpus/korean/` — 3 monthly inventory PDFs + shipment log, born-digital
+  via reportlab). Cross-document row recurrence works (12 rows/3 docs →
+  candidate). Full loop closes end-to-end: adopt → next document's rows
+  verified mechanically at ingest (`row_verify.py`, `pipeline` registry +
+  `row_verifications` in `IngestOutcome`/`IngestView`). Header rows are
+  honestly refused when read as data against an enum contract

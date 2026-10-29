@@ -206,3 +206,73 @@ def test_table_is_chunked_whole_even_when_document_is_split():
     table_chunks = [c for c in outcome.quarantined_chunks if "t1" in c.chunk_id]
     assert len(table_chunks) == 1
     assert table_chunks[0].text.count("\n") == 29
+
+
+class NoneExtractor:
+    def extract(self, chunk):
+        return None
+
+
+class TestRowContractVerification:
+    """An adopted row contract verifies real rows at ingest time.
+
+    The loop this closes: discovery surfaces a shape, the owner adopts it
+    through the gate, and the NEXT document with the same table is verified
+    mechanically row by row -- no re-quarantine, no model, no guessing.
+    Rows whose shape matches nothing stay discovery observations.
+    """
+
+    def _contract(self, name, kinds):
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        return ShapeContract(
+            name=name,
+            tier="strict",
+            fields=tuple(
+                FieldSpec(name=f"field_{i}", kind=kind, required=True)
+                for i, kind in enumerate(kinds)
+            ),
+        )
+
+    def _ingest_table_doc(self, contract, table_rows, doc_id="kr"):
+        from rag_ingest.escalation import ReviewQueue
+        from rag_ingest.pipeline import IngestPipeline
+        from rag_ingest.shapes import ShapeRegistry
+
+        registry = ShapeRegistry()
+        registry.register(contract)
+        elements = [
+            paragraph("부품 재고 관리 대장. " * 20),
+            table(table_rows),
+        ]
+        raw, located = RawDocument.from_elements(doc_id, elements)
+        pipeline = IngestPipeline(ReviewQueue(), NoneExtractor(), today=TODAY,
+                                  registry=registry)
+        return pipeline.ingest(raw, located, owner_id="owner-1")
+
+    def test_adopted_row_contract_verifies_rows_at_ingest(self):
+        outcome = self._ingest_table_doc(
+            self._contract("row:text,text,text,text,number,number_spec",
+                           ("text", "text", "text", "text", "number", "number")),
+            (
+                ("품목코드", "품목명", "규격", "단위", "재고", "안전재고"),
+                ("IV-001", "육안검사기", "KS-A 12mm", "개", "150", "30"),
+                ("IV-002", "베어링6204", "20x47x14", "개", "2,400", "500"),
+            ),
+        )
+
+        verified = [v for v in outcome.row_verifications if v.status == "grounded"]
+        assert len(verified) == 2
+        assert verified[0].cells[0] == "IV-001"
+
+    def test_rows_matching_no_contract_are_not_verified(self):
+        outcome = self._ingest_table_doc(
+            self._contract("row:text,text,text,text,number,number_spec",
+                           ("text", "text", "text", "text", "number", "number")),
+            (
+                ("부품코드", "상태", "판정", "메모"),
+                ("AN310-4", "PASS", "합격", "정상"),
+            ),
+        )
+
+        assert outcome.row_verifications == ()

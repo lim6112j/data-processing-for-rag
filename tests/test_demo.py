@@ -1275,3 +1275,68 @@ class TestLlmProposerFallback:
         # Still None to the caller: a refusal is a refusal, whichever layer
         # produced it. The UI never gets a guessed schema to show.
         assert proposal is None
+
+
+class TestRowVerificationInView:
+    """The ingest view carries row verification results so the UI can show
+    what an adopted contract actually did to the newest document."""
+
+    def test_verified_rows_appear_in_the_view(self):
+        from rag_ingest.shapes import FieldSpec, GoldCaseSpec, ShapeContract
+
+        session = DemoSession(today=TODAY)
+        rows = (
+            ("부품코드", "상태", "판정", "메모"),
+            ("AN310-4", "PASS", "합격", "정상"),
+            ("MS20365-3", "FAIL", "불합격", "손상"),
+        )
+        raw, located = RawDocument.from_elements(
+            "d1",
+            [
+                Element(element_id="p1", kind=ElementKind.PARAGRAPH, page=1,
+                        text="검사 기록. " * 30),
+                Element(element_id="t1", kind=ElementKind.TABLE, page=1,
+                        text="", table_rows=rows),
+            ],
+        )
+        session.ingest(doc_id="d1", filename="d1.pdf", parser="test",
+                       raw=raw, elements=located)
+
+        contract = ShapeContract(
+            name="row:text,text,text,text_spec",
+            tier="strict",
+            fields=(
+                FieldSpec(name="field_0", kind="text", required=True),
+                FieldSpec(name="field_1", kind="enum", required=True,
+                          values=("PASS", "FAIL", "HOLD")),
+                FieldSpec(name="field_2", kind="text", required=False),
+                FieldSpec(name="field_3", kind="text", required=False),
+            ),
+        )
+        cases = (
+            GoldCaseSpec(values={"field_0": "AN310-4", "field_1": "PASS",
+                                  "field_2": "합격", "field_3": "정상"},
+                          expected="verified"),
+            GoldCaseSpec(values={"field_0": "MS20365-3", "field_1": "폐기",
+                                  "field_2": "불합격", "field_3": "손상"},
+                          expected="mismatch"),
+        )
+        assert session.adopt_with_gate(contract, cases).registered
+
+        raw2, located2 = RawDocument.from_elements(
+            "d2",
+            [
+                Element(element_id="p1", kind=ElementKind.PARAGRAPH, page=1,
+                        text="검사 기록. " * 30),
+                Element(element_id="t1", kind=ElementKind.TABLE, page=1,
+                        text="", table_rows=rows),
+            ],
+        )
+        view = session.ingest(doc_id="d2", filename="d2.pdf", parser="test",
+                              raw=raw2, elements=located2)
+
+        data_rows = [(s2, t) for s2, t in view.row_verifications if "부품코드" not in t]
+        assert [s2 for s2, _t in data_rows] == ["grounded", "grounded"]
+        # The header row is refused: read as data, its status cell is not in
+        # the closed set. Named, not silent.
+        assert any(s2 == "mismatch" and "부품코드" in t for s2, t in view.row_verifications)

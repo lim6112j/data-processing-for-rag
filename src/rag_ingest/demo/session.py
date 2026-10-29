@@ -94,6 +94,9 @@ class IngestView(BaseModel):
     review_items: tuple[ReviewItemView, ...] = Field(default_factory=tuple)
     verified_count: int = 0
     quarantined_count: int = 0
+    #: Rows verified against adopted row contracts at ingest time, as
+    #: (status, row_text) pairs. Empty unless a contract matched.
+    row_verifications: tuple[tuple[str, str], ...] = Field(default_factory=tuple)
 
     @property
     def verification_rate(self) -> float:
@@ -179,6 +182,7 @@ class DemoSession:
             today=self.today,
             adjudicator=self._wrapped_adjudicator(),
             producer=self.producer,
+            registry=self.registry(),
         )
         if self.force_structure_ambiguous:
             outcome = self._force_ambiguous(pipeline, raw, elements)
@@ -223,6 +227,9 @@ class DemoSession:
             review_items=self._item_views(outcome),
             verified_count=len(outcome.verified_chunks),
             quarantined_count=len(outcome.quarantined_chunks),
+            row_verifications=tuple(
+                (v.status, v.row_text) for v in outcome.row_verifications
+            ),
         )
         self.views[doc_id] = view
         return view
