@@ -96,8 +96,13 @@
 <main>
   <section class="col">
     <div class="drop" id="drop">
-      Drop a PDF here, or click to choose
+      <span id="drop-label">Drop a PDF here, or click to choose</span>
       <input type="file" id="file" accept="application/pdf" hidden>
+    </div>
+    <div class="row" id="file-actions" style="margin-top:8px;display:none">
+      <button class="primary" onclick="ingestStaged('whole')">Ingest whole document</button>
+      <button onclick="ingestStaged('auto')">Auto-slice ingest</button>
+      <button onclick="clearStaged()">✕</button>
     </div>
     <div class="row" style="margin-top:12px">
       <label class="meta" style="display:flex;align-items:center;gap:4px">
@@ -167,10 +172,31 @@ drop.onclick = () => fileInput.click();
 drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('hot'); };
 drop.ondragleave = () => drop.classList.remove('hot');
 drop.ondrop = (e) => {
-  e.preventDefault(); drop.classList.remove('hot');
-  if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+  e.preventDefault(); drop.classList.add('hot');
+  if (e.dataTransfer.files[0]) stageFile(e.dataTransfer.files[0]);
 };
-fileInput.onchange = () => fileInput.files[0] && upload(fileInput.files[0]);
+fileInput.onchange = () => fileInput.files[0] && stageFile(fileInput.files[0]);
+
+// Dropping stages the file; it does not start parsing. For a 600-page
+// manual the whole-document path costs 35s+ and a memory spike before the
+// owner can choose auto-slice, so the strategy is an explicit choice.
+let staged = null;
+function stageFile(file) {
+  staged = file;
+  $('#drop-label').textContent = `Ready: ${file.name} (${(file.size / 1048576).toFixed(1)} MB)`;
+  $('#file-actions').style.display = 'flex';
+}
+function clearStaged() {
+  staged = null;
+  fileInput.value = '';
+  $('#drop-label').textContent = 'Drop a PDF here, or click to choose';
+  $('#file-actions').style.display = 'none';
+}
+async function ingestStaged(mode) {
+  if (!staged) return;
+  if (mode === 'auto') return autoSliceIngest();
+  return upload(staged);
+}
 
 async function upload(file) {
   $('#err').textContent = '';
@@ -375,11 +401,11 @@ function placeRelative(node, bbox, originLeft, originTop, scale) {
 
 /* ---------- sidebar ---------- */
 async function autoSliceIngest() {
-  if (!fileInput.files.length) { alert('Choose a PDF first'); return; }
+  if (!staged) { alert('Choose a PDF first'); return; }
   $('#err').textContent = '';
   $('#spinner').classList.add('on');
   const form = new FormData();
-  form.append('file', fileInput.files[0]);
+  form.append('file', staged);
   try {
     const res = await fetch(`/api/ingest/auto?parser=${encodeURIComponent($('#parser').value)}&batch=20`, {
       method: 'POST', body: form,
