@@ -86,6 +86,7 @@
   <h1>rag-ingest</h1>
   <span class="sub">Grounding-gated ingestion — verified chunks enter retrieval, everything else becomes a question</span>
   <div class="row" style="margin-top:8px">
+    <button onclick="autoSliceIngest()">⚙ Auto-slice ingest</button>
     <button onclick="exportVerified()">⬇ Export verified</button>
     <button onclick="pushToLightRag()">→ Push to LightRAG</button>
     <button onclick="clearLightRag()">⌫ Clear LightRAG</button>
@@ -373,6 +374,29 @@ function placeRelative(node, bbox, originLeft, originTop, scale) {
 }
 
 /* ---------- sidebar ---------- */
+async function autoSliceIngest() {
+  if (!fileInput.files.length) { alert('Choose a PDF first'); return; }
+  $('#err').textContent = '';
+  $('#spinner').classList.add('on');
+  const form = new FormData();
+  form.append('file', fileInput.files[0]);
+  try {
+    const res = await fetch(`/api/ingest/auto?parser=${encodeURIComponent($('#parser').value)}&batch=20`, {
+      method: 'POST', body: form,
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const d = await res.json();
+    const lines = d.slices.map(s =>
+      `pages ${s.page_start}–${s.page_end}: ${s.verified_count} verified, ${s.quarantined_count} withheld, ${s.review_items} queued`).join('\n');
+    alert(`Auto-sliced ${d.doc_id} (${d.total_pages} pages, batches of ${d.batch}):\n${lines}\n\nTotals: ${d.totals.verified} verified, ${d.totals.withheld} withheld, ${d.totals.queued} queued${d.totals.dropped ? `, ${d.totals.dropped} DROPPED (queue full)` : ''}`);
+    await refreshSidebar();
+  } catch (e) {
+    $('#err').textContent = e.message;
+  } finally {
+    $('#spinner').classList.remove('on');
+  }
+}
+
 async function exportVerified() {
   const res = await fetch('/api/export');
   const blob = await res.blob();

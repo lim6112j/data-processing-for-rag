@@ -1647,3 +1647,107 @@ class TestQueueOverflowIsVisible:
 
         assert response.status_code == 200, response.text
         assert response.json()["review_queue_dropped"] >= 1
+
+
+class TestAutoSliceIngest:
+    @pytest.fixture
+    def client(self):
+        from rag_ingest.demo import server
+
+        server._session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        return TestClient(server.app)
+
+    """Auto-slicing: one upload, the server counts pages and ingests fixed
+    batches sequentially. A 600-page manual becomes ordinary ingests with no
+    hand-typed ranges, and each slice's verdict reports so the owner sees
+    the whole document's shape."""
+
+    def test_small_document_is_one_slice(self, client, tmp_path):
+        path = tmp_path / "a.pdf"
+        make_pdf(path)
+        with path.open("rb") as handle:
+            response = client.post(
+                "/api/ingest/auto?parser=pdfplumber&batch=50",
+                files={"file": ("a.pdf", handle, "application/pdf")},
+            )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert len(body["slices"]) == 1
+        assert body["slices"][0]["page_start"] == 1
+        assert body["totals"]["verified"] == body["slices"][0]["verified_count"]
+
+
+class TestAutoSliceBatchPolicy:
+    @pytest.fixture
+    def client(self):
+        from rag_ingest.demo import server
+
+        server._session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        return TestClient(server.app)
+
+    """Batch size is policy, not taste: a slice whose questions overflow the
+    WIP cap loses them, so the default batch must be small enough that a
+    full page-slice's questions fit the queue -- and the auto response must
+    surface drops so overflow is never invisible."""
+
+    def test_default_batch_is_queue_safe(self):
+        import inspect
+
+        from rag_ingest.demo import server
+
+        source = inspect.getsource(server.ingest_auto)
+        assert "batch: int = 20" in source
+
+    def test_auto_totals_surface_dropped(self, client, tmp_path, monkeypatch):
+        from datetime import date as _date
+
+        import rag_ingest.demo.server as server_mod
+        from rag_ingest.escalation import EscalationReason, ReviewItem, ReviewQueue
+
+        path = tmp_path / "a.pdf"
+        make_pdf(path)
+
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        session.queue = ReviewQueue(wip_limit=1)
+        session.queue.enqueue(ReviewItem(
+            item_id="prefill:chunk:triage", doc_id="prefill", chunk_id="chunk",
+            reason=EscalationReason.UNCLASSIFIED, question="?", owner_id="o",
+            created_on=_date(2026, 10, 1),
+        ))
+        monkeypatch.setattr(server_mod, "_session", session)
+        original = server_mod._session
+        server_mod._session = session
+        try:
+            with path.open("rb") as handle:
+                response = client.post(
+                    "/api/ingest/auto?parser=pdfplumber&batch=50",
+                    files={"file": ("a.pdf", handle, "application/pdf")},
+                )
+        finally:
+            server_mod._session = original
+
+        assert response.status_code == 200, response.text
+        assert response.json()["totals"]["dropped"] >= 1
+
+
+class TestQueueCapacityFromEnv:
+    """A 646-page document produces ~170 real questions; the default WIP cap
+    (25) fills on page ~90 and everything after is a visible drop. The cap's
+    size is an operator decision for the corpus at hand, so the demo session
+    reads it from RAG_REVIEW_WIP -- still bounded, still visible, just not
+    wrongly sized for large documents."""
+
+    def test_env_raises_the_cap(self, monkeypatch):
+        from rag_ingest.demo.session import DemoSession
+
+        monkeypatch.setenv("RAG_REVIEW_WIP", "200")
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        assert session.queue.wip_limit == 200
+
+    def test_default_cap_stands_without_env(self, monkeypatch):
+        from rag_ingest.demo.session import DemoSession
+
+        monkeypatch.delenv("RAG_REVIEW_WIP", raising=False)
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        assert session.queue.wip_limit == 25

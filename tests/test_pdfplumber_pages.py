@@ -54,3 +54,15 @@ class TestPageRangeParsing:
         marker_pages = sorted({e.page for e in elements if "PAGE-MARKER" in e.text})
         assert marker_pages == [4, 5]
         assert {pg.page_no for pg in raw.pages} == {4, 5}
+
+
+class TestPageCount:
+    """Auto-slicing needs the page count before choosing slice boundaries:
+    a cheap count, not a full parse."""
+
+    def test_page_count_matches_document(self, tmp_path):
+        from rag_ingest.adapters.pdfplumber import page_count
+
+        path = tmp_path / "doc.pdf"
+        _make_multipage_pdf(path, pages=7)
+        assert page_count(str(path)) == 7

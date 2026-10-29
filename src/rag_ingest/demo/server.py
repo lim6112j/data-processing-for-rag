@@ -130,10 +130,20 @@ async def ingest(
     finally:
         temp_path.unlink(missing_ok=True)
 
-    view = _session.ingest(
+    return _run_ingest(
         doc_id=doc_id,
         filename=file.filename or doc_id,
         parser=resolved_parser,
+        raw=raw,
+        elements=elements,
+    )
+
+
+def _run_ingest(*, doc_id: str, filename: str, parser: str, raw, elements) -> dict:
+    view = _session.ingest(
+        doc_id=doc_id,
+        filename=filename,
+        parser=parser,
         raw=raw,
         elements=elements,
     )
@@ -143,6 +153,83 @@ async def ingest(
     # react to it (resolve, adopt, or ingest narrower slices).
     payload["review_queue_dropped"] = _session.queue_dropped_total
     return payload
+
+
+@app.post("/api/ingest/auto")
+async def ingest_auto(
+    file: UploadFile = File(...), parser: str = "auto", batch: int = 20
+) -> dict:
+    """Ingest a large document as automatic page batches.
+
+    The server counts pages and slices -- the owner uploads once and never
+    hand-types ranges. Batches run sequentially in one request so a slice's
+    adopted shapes verify later slices in the same pass; each slice keeps its
+    own doc_id namespace and the response aggregates the per-slice verdicts.
+
+    The default batch (20) is policy, not taste: a slice whose questions
+    overflow the review queue's WIP cap (25) loses them, and the measured
+    question rate (~0.27/page on a 646-page manual) puts 20 pages safely
+    under the cap even with a few questions already open.
+    """
+    payload_bytes = await file.read()
+    if not payload_bytes:
+        raise HTTPException(400, "empty upload")
+    if batch < 1:
+        raise HTTPException(400, "batch must be >= 1")
+
+    doc_id = Path(file.filename or "document").stem
+    suffix = Path(file.filename or "x.pdf").suffix or ".pdf"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+        handle.write(payload_bytes)
+        temp_path = Path(handle.name)
+
+    try:
+        from rag_ingest.adapters.pdfplumber import page_count
+        from rag_ingest.demo.parsing import parse_pdf
+
+        total_pages = page_count(str(temp_path))
+        slices = []
+        for start in range(1, total_pages + 1, batch):
+            end = min(start + batch - 1, total_pages)
+            raw, elements, resolved = parse_pdf(
+                temp_path,
+                doc_id=f"{doc_id}:part{start:04d}-{end:04d}",
+                parser=parser,
+                pages=(start, end),
+            )
+            summary = _run_ingest(
+                doc_id=f"{doc_id}:part{start:04d}-{end:04d}",
+                filename=file.filename or doc_id,
+                parser=resolved,
+                raw=raw,
+                elements=elements,
+            )
+            slices.append({
+                "page_start": start,
+                "page_end": end,
+                "verified_count": summary["verified_count"],
+                "quarantined_count": summary["quarantined_count"],
+                "review_items": len(summary["review_items"]),
+                "dropped": summary["review_queue_dropped"],
+            })
+        return {
+            "doc_id": doc_id,
+            "total_pages": total_pages,
+            "batch": batch,
+            "slices": slices,
+            "totals": {
+                "verified": sum(s["verified_count"] for s in slices),
+                "withheld": sum(s["quarantined_count"] for s in slices),
+                "queued": sum(s["review_items"] for s in slices),
+                "dropped": sum(s["dropped"] for s in slices),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # a bad upload must not 500 the demo
+        raise HTTPException(422, f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 @app.get("/api/page/{doc_id}/{page_no}")

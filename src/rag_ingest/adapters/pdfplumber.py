@@ -168,6 +168,20 @@ def pdf_to_raw(
     )
 
 
+def page_count(path: str) -> int:
+    """The document's page count -- cheap metadata, not a parse.
+
+    Auto-slicing needs this before choosing boundaries: counting pages opens
+    the PDF's cross-reference table, not its content streams.
+    """
+    try:
+        import pdfplumber
+    except ImportError as exc:  # pragma: no cover - depends on env
+        raise RuntimeError("pdfplumber adapter needs 'pdfplumber': uv add pdfplumber") from exc
+    with pdfplumber.open(path) as pdf:
+        return len(pdf.pages)
+
+
 def _page_slice(
     all_pages: list[Any],
     pages: tuple[int, int] | None,

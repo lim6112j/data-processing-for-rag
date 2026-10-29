@@ -104,6 +104,21 @@ class IngestView(BaseModel):
         return 0.0 if total == 0 else self.verified_count / total
 
 
+def _queue_from_env() -> ReviewQueue:
+    """The WIP cap sized by the operator, via RAG_REVIEW_WIP.
+
+    The default (25) fits ordinary documents; a 600-page manual produces
+    ~170 real questions, and a cap smaller than the corpus's honest question
+    count is not discipline -- it is censorship with extra steps. The cap
+    stays bounded and the drop count stays visible either way.
+    """
+    import os
+
+    raw = os.environ.get("RAG_REVIEW_WIP")
+    limit = int(raw) if raw and raw.isdigit() else 25
+    return ReviewQueue(wip_limit=limit)
+
+
 @dataclass
 class DemoSession:
     """Documents, review queue, and the T2 health signal for one demo run."""
@@ -134,7 +149,7 @@ class DemoSession:
     #: simulation of a real defect, and the UI labels it as such.
     force_structure_ambiguous: bool = False
 
-    queue: ReviewQueue = field(default_factory=ReviewQueue)
+    queue: ReviewQueue = field(default_factory=_queue_from_env)
     documents: dict[str, RawDocument] = field(default_factory=dict)
     #: The located elements behind each document, kept so owner approval can
     #: re-derive a chunk's quote from the source it claims to cite.
