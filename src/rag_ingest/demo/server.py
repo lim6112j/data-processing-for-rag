@@ -28,7 +28,12 @@ app = FastAPI(title="rag-ingest demo", version="0.1.0")
 #: One session for the whole process. A demo, not a service: concurrent users
 #: would share a review queue, which is either fine for a walkthrough or the
 #: exact thing you would change first in a real deployment.
-_session = DemoSession()
+# Adoptions persist across restarts: a contract the owner proved through the
+# gate is corpus knowledge, not session state. Losing it on a server bounce
+# would silently re-quarantine every table the contract had already answered.
+# Corrupt or missing files fail closed to builtins (DemoSession's contract).
+_SESSION_DIR = Path(tempfile.gettempdir()) / "rag-demo"
+_session = DemoSession(shapes_path=_SESSION_DIR / "shapes.json")
 
 
 class ReviewRequest(BaseModel):
