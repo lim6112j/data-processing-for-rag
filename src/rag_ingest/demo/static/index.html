@@ -209,6 +209,24 @@ function render(view) {
       <td class="muted">${esc((t.reasons || []).join(', ') || '—')}</td>
     </tr>`).join('');
 
+  // Row verification: what an adopted contract actually did to this
+  // document's table rows. Empty means no contract matched -- shown as
+  // its own line, because a silent zero would hide the adoption failing
+  // to bite, which is exactly the failure an owner needs to see.
+  const rowVerifs = view.row_verifications || [];
+  const rowVerifRows = rowVerifs.map(([status, text]) => `
+    <tr>
+      <td><span class="pill ${status === 'grounded' ? 'ok' : 'bad'}">${esc(status)}</span></td>
+      <td class="mono chunk-text">${esc(text)}</td>
+    </tr>`).join('');
+  const rowVerifSection = `
+    <div class="section">
+      <h2>Row verification</h2>
+      ${rowVerifRows
+        ? `<table><thead><tr><th>verdict</th><th>row</th></tr></thead><tbody>${rowVerifRows}</tbody></table>`
+        : `<div class="muted">No adopted row contract matched this document — rows stay discovery observations.</div>`}
+    </div>`;
+
   $('#result').innerHTML = `
     <div class="stat">
       <div><b>${rate}%</b><span>verification</span></div>
@@ -233,7 +251,8 @@ function render(view) {
       <h2>Tier routing</h2>
       <table><thead><tr><th>element</th><th>tier</th><th>scores</th><th>why</th></tr></thead>
       <tbody>${tiers || '<tr><td colspan="4" class="muted">no elements</td></tr>'}</tbody></table>
-    </div>`;
+    </div>
+    ${rowVerifSection}`;
 }
 
 async function loadOverlay(docId) {
