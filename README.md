@@ -1,15 +1,20 @@
 # rag-ingest
 
-**Status:** working prototype. 356 tests, runs real PDFs end-to-end
-through Docling + pdfplumber with OpenRouter as the adjudication backend, and
-ships an interactive demo server.
+**Status:** working prototype. 493 tests, runs real PDFs end-to-end
+through Docling + pdfplumber with OpenRouter as the adjudication backend, ships
+an interactive demo server, **learns table shapes** (discovery → proposal →
+adoption → row verification), and exports verified chunks into a downstream
+LightRAG graph-RAG store.
 
 ## Summary
 
 Ingestion for RAG that refuses to guess. The output of a document is one of three
 things: **verified** chunks that enter retrieval, **quarantined** chunks that
 become a specific question to the document owner, or a **recorded failure**. There
-is no fourth path where a plausible-looking value slips through.
+is no fourth path where a plausible-looking value slips through. And the loop
+closes: when the owner answers a quarantine question, the answer goes back
+through the gate before the chunk enters retrieval — approval is about meaning,
+citation is the machine's.
 
 The problem it exists for: most pipelines gate on "does the extracted output
 validate against a schema?" When the extractor is a constrained-decoding LLM, that
@@ -38,6 +43,8 @@ it stops being right.
 | T1 | Mechanical grounding validator — re-derivation, required-evidence threshold, no model |
 | T2 | OpenRouter adjudicator, consulted only on parser disagreement, guarded by a circuit breaker |
 | T3 | Chunk-scoped review queue with owner-correction labels |
+| Shape learning | Discovery clusters recurring table shapes → grammar (then LLM, as labelled fallback) proposes a contract → the owner adopts it through adversarial gold cases → the contract verifies rows in later documents and promotes fully-grounded table chunks out of quarantine |
+| Export | `GET /api/export` projects verified chunks (and owner-approval history) to JSONL; `lightrag_push` injects them chunk-by-chunk into a LightRAG server so provenance survives |
 
 T1 applies one of three bars, chosen from the ontology type the extractor claimed
 and never from a model:
@@ -59,7 +66,7 @@ damage-repair machinery: the text layer is the source, and a value the document
 does not contain is a mismatch, not something to read through.
 
 ```bash
-uv run pytest                          # 356 tests, no network
+uv run pytest                          # 493 tests, no network
 uv run rag-demo                        # interactive UI on :8765
 uv run rag-goldset                     # decision-level gold set (6/6)
 uv run rag-goldset --corpus ./pdfs     # real PDFs, per-document accounting
@@ -133,15 +140,19 @@ share.
 
 ### What it does not do yet
 
-- **Ontology v1 covers two shapes** (invoice header, report section). Real corpora
-  will mostly fall to `unclassified`, which is the intended signal for extending it.
+- **Ontology v1 covers two built-in shapes** (invoice header, report section), but
+  table shapes are no longer fixed: discovery + adoption grows contracts at
+  runtime, gated by the same adversarial cases as everything else. Non-table
+  shapes still fall to `unclassified`, which is the intended signal.
 - **`TemplateExtractor` is one invoice template**, not a general extractor.
 - **T2 is rarely exercised** on clean corpora — no structural damage means no
   disagreement, which is the honest answer but means its precision is unmeasured
   outside the example label set.
-- **No vector store, no persistence.** Policies are implemented; storage backends
-  are not. The demo holds one in-memory session for the whole process, so
-  concurrent visitors share a review queue.
+- **No built-in vector store.** The verified-chunk policy is implemented and
+  proven end-to-end against an external LightRAG server (`/api/export` +
+  `lightrag_push`); embeddings and graph construction are deliberately left to
+  the downstream store, which already does them well. The demo holds one
+  in-memory session, though adopted shape contracts persist across restarts.
 
 Details for each of these are in *Known limitations* and *Deliberate non-goals*
 below.
@@ -356,6 +367,64 @@ Circuit breaker:
 Two floors keep it from flapping: nothing trips on fewer than 5 calls or 10
 labelled cases. A single transport blip is not a pattern.
 
+## The shape-learning loop
+
+The built-in ontology covers two shapes; most real tables fit neither. Rather
+than guess, the pipeline turns unrecognised tables into *learnable* shapes, with
+the owner's judgment as the only authority and the gate as the only verifier:
+
+```
+quarantined table chunks → row signatures (per table: column-major, roles pooled
+        only when tables agree on their own column meanings)
+  → discovery clusters recurring signatures across documents
+  → proposal: the grammar proposer emits a JSON schema + evidence from samples
+      (falls back to an LLM proposer ONLY after the grammar refuses; its claims
+       are labelled source="llm" and every one is mechanically verified: cited
+       values must literally occur in the cited row, columns must fit the width)
+  → adoption: the owner must prove the contract with adversarial gold cases
+      (a "refusal" case that the gate cannot refuse is rejected — an
+       unfalsifiable case is a rubber stamp in reverse)
+  → verification: later documents' rows are matched by declared field kinds
+      (not by contract name) and every cell re-grounded through the standard gate
+  → promotion: a table chunk whose matched rows ALL ground enters retrieval;
+      one refused row keeps the whole chunk withheld — a partially understood
+      table is not understood. Header rows stay discovery observations.
+```
+
+Two invariants are structural, not conventional: the LLM proposer never sees a
+grounding failure (it resolves structural questions only), and its pick is
+re-checked by T1 before anything enters retrieval.
+
+Measured on a Korean multi-document corpus (3 monthly inventory PDFs + a
+shipment log): the inventory shape recurs across documents and its contract
+verifies every row of a new month — including the honesty cases, like a header
+row read against an enum contract being refused rather than passed.
+
+## Getting the verified chunks out
+
+Verification is the entry requirement for retrieval, and the handoff keeps it:
+
+```bash
+curl http://127.0.0.1:8765/api/export > verified.jsonl
+uv run python -m rag_ingest.scripts.lightrag_push verified.jsonl http://127.0.0.1:9621
+```
+
+- **Verified only.** Export is a projection of the gate, not a choice —
+  quarantined chunks cannot appear no matter how the request is shaped.
+- **Chunk boundaries survive.** One insert per chunk, so the boundaries the gate
+  verified are the boundaries the graph-RAG reasons over; `gate_tier` rides
+  along so "contract arithmetic" stays distinguishable from "verbatim quote".
+- **Owner approvals ride along too.** A chunk promoted by owner approval carries
+  its approval record; downstream stores can separate the two knowledge grades.
+- **Duplicate content is reported, not swallowed.** The same prose in twelve
+  monthly documents is one fact — LightRAG's 409 lands in a `duplicates` bucket,
+  visible and distinct from failures.
+
+Measured end-to-end against a live LightRAG (v1.5.3, SSH tunnel): 6 verified
+chunks pushed 6/6, and hybrid queries answer from the injected knowledge with
+the source document cited — "재고가 안전재고 이하로 내려가면 발주를 개시한다",
+referencing `inventory-2026-08`.
+
 ## T0 extraction: making verification non-zero
 
 `TemplateExtractor` is a pattern matcher, not a model. Its job is to find values
@@ -473,11 +542,26 @@ src/rag_ingest/
   scoring.py      score T2 picks against owner corrections
   circuit.py      breaker wrapping T2: fast + slow signals, half-open probes
   ingest_runner.py corpus batch: failure isolation + per-document accounting
+  table_rows.py   row extraction from table chunks: signatures + cell provenance
+  discovery.py    shape discovery: row signatures, per-table column roles, clusters
+  propose.py      grammar proposer: schema + evidence from cluster samples
+  llm_propose.py  LLM proposer fallback: claims only, every claim re-verified
+  shapes.py       shape contracts, adoption gate (gold cases decide, not vibes)
+  row_verify.py   verify later documents' rows against adopted contracts
+  promotion.py    owner approval closes quarantine — through the gate, never past it
+  export.py       verified chunks → JSONL (tier + approval history ride along)
+  scripts/
+    lightrag_push.py  chunk-by-chunk injection into a LightRAG server
   adapters/
+    openrouter_client.py  one OpenRouter client resolver for every LLM role
+  demo/
+    static/index.html    the UI
+    (discovery, proposal cards, adoption cases, row verification, approval)
     docling.py    DoclingDocument -> Element/RawDocument, bbox + page images
     pdfplumber.py PDF -> Element/RawDocument, geometric tables + page images
     openrouter.py T2 backend: structured output, image input, degrades safely
-  pipeline.py     T0 -> T1 -> T2 -> quarantine orchestration
+    openrouter_client.py one client resolver shared by T2 and the LLM proposer
+  pipeline.py     T0 -> T1 -> T2 -> quarantine orchestration (+ row verification)
   gate_tier.py    which bar a claimed record must clear, from its ontology type
   goldset.py      gold-set loader, replay extractor, decision checker
   cli.py          `rag-goldset`
@@ -488,14 +572,14 @@ src/rag_ingest/
     producers.py    scripted second reading, so T2 is reachable in a demo
     fake_adjudicator.py  scripted T2 -- shape of the path, not judgement
     static/index.html    the UI
-tests/            356 tests
+tests/            493 tests
 goldset/cases.yaml  adversarial cases, each asserting a decision
 ```
 
 ## Run it
 
 ```bash
-uv run pytest                                 # 356 tests
+uv run pytest                                 # 493 tests
 uv run pytest -m live                         # one real OpenRouter call
 uv run pytest --cov=rag_ingest                # coverage
 uv run rag-goldset                            # gold-set report
@@ -544,10 +628,9 @@ and per-class, because a 5% global rate can hide 100% on one high-volume class.
   values from the *text buffer*, so a total that contradicts its own line items
   passes if both are verbatim. The deterministic checks in `checks.py` close
   part of that gap (dates, arithmetic); T2's page-image path covers the rest.
-- Ontology v1 deliberately covers two shapes only. Extend it from the cluster
-  report on a real seed corpus, not from imagination.
-- Ontology v1 deliberately covers two shapes only. Extend it from the cluster
-  report on a real seed corpus, not from imagination.
+- Ontology v1 deliberately covers two built-in shapes only. Table shapes grow
+  through discovery + adoption; other shapes extend from the cluster report on
+  a real seed corpus, not from imagination.
 - **`verified` is a weaker claim than it sounds.** It means "the value appears in
   the parser's text buffer where it claims to", not "the value is correct". A
   self-consistent wrong number passes. See [survey.md](survey.md) §3 on why span
