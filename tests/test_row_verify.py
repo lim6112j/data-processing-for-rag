@@ -118,3 +118,45 @@ class TestVerifyRows:
 
         # Builtins only: no row contract matches these Korean inventory rows.
         assert verify_rows(rows, chunk, gate, ShapeRegistry.with_builtins()) == ()
+
+
+class TestContractMatchingByDeclaredKinds:
+    """The grammar proposer can describe the same column structure under two
+    names -- 'row:..._spec' from a routed row cluster and 'tabular_spec' from
+    the blob cluster whose lines parse as rows. Matching by name would make
+    the tabular adoption silently inert; matching by declared field kinds
+    makes both drive row verification, because both ARE the same shape."""
+
+    def _blob_contract(self):
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        return ShapeContract(
+            name="tabular_spec",
+            tier="strict",
+            fields=tuple(
+                FieldSpec(name=f"field_{i}", kind=kind, required=True)
+                for i, kind in enumerate(("text", "text", "text", "text", "number", "number"))
+            ),
+        )
+
+    def test_tabular_named_contract_verifies_rows(self):
+        from rag_ingest.row_verify import verify_rows
+
+        raw, chunk, rows = _doc_and_rows()
+        registry = ShapeRegistry()
+        registry.register(self._blob_contract())
+        gate = GroundingGate(raw, shapes=registry)
+
+        verifications = verify_rows(rows, chunk, gate, registry)
+
+        grounded = [v for v in verifications if v.status == "grounded"]
+        assert len(grounded) == 2
+        assert all(v.contract_name == "tabular_spec" for v in grounded)
+
+    def test_builtins_never_verify_table_rows(self):
+        from rag_ingest.row_verify import verify_rows
+
+        raw, chunk, rows = _doc_and_rows()
+        gate = GroundingGate(raw, shapes=ShapeRegistry.with_builtins())
+
+        assert verify_rows(rows, chunk, gate, ShapeRegistry.with_builtins()) == ()

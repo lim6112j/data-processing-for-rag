@@ -69,11 +69,25 @@ def verify_rows(
     """
     from rag_ingest.ontology import FieldValue
 
-    contracts = {
-        name[len("row:"):-len("_spec")]: contract
-        for name, contract in registry._contracts.items()
-        if name.startswith("row:") and name.endswith("_spec")
-    }
+    # A contract is matched by its DECLARED field kinds, not by its name.
+    # The grammar proposer can emit the same column structure under either
+    # name -- 'row:..._spec' from a routed row cluster, 'tabular_spec' from
+    # the blob cluster whose lines happen to parse as rows -- and both describe
+    # the same shape. An enum column classifies as text (the classifier sees
+    # closed-set members as text); that is the same mapping discovery used.
+    def field_kinds_signature(contract) -> str | None:
+        kinds = {"text": "text", "enum": "text", "number": "number"}
+        if any(f.kind not in kinds for f in contract.fields):
+            return None
+        return "row:" + ",".join(kinds[f.kind] for f in contract.fields)
+
+    contracts: dict[str, object] = {}
+    for contract in registry._contracts.values():
+        if not contract.name.endswith("_spec"):
+            continue  # builtins (invoice/report/prose) never verify table rows
+        signature = field_kinds_signature(contract)
+        if signature is not None and signature not in contracts:
+            contracts[signature] = contract
     if not contracts:
         return ()
 
@@ -83,7 +97,7 @@ def verify_rows(
     verifications: list[RowVerification] = []
     for row in rows:
         signature = signatures[id(row)][len("row:"):]
-        contract = contracts.get(signature)
+        contract = contracts.get("row:" + signature)
         if contract is None or len(contract.fields) != len(row.cells):
             continue
         claimed: dict[str, FieldValue] = {}

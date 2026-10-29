@@ -448,11 +448,17 @@ async function proposeShape(shape) {
 
 function buildAdoptionCases(proposal) {
   // Case 1: every required field claimed with a plausible value; must verify.
-  // Case 2: the first range pair inverted; must be refused. This is the
-  // falsification direction -- if the gate passes an inverted range, the
-  // contract does not do what it declared, and adoption blocks.
+  // Case 2: a real violation; the gate MUST refuse. The violation comes from
+  // the strongest declared constraint available, in this order:
+  //   1. an inverted range pair (min > max) -- constraint proven both ways;
+  //   2. an out-of-enum value -- the closed set bites;
+  //   3. a non-numeric value in a number field -- refused as unverifiable.
+  // Without this, a contract whose only constraints are number kinds got two
+  // IDENTICAL cases: the "refusal" case passed like the positive one, and
+  // every such adoption 409'd forever. A case that cannot fail is not a
+  // falsification -- it is rubber-stamping with extra steps.
   const positive = {};
-  const inverted = {};
+  const negative = {};
   const rangeFields = proposal.fields.filter(f => f.min_ref);
   for (const f of proposal.fields) {
     if (f.min_ref) continue;
@@ -461,19 +467,34 @@ function buildAdoptionCases(proposal) {
       : f.values && f.values.length ? f.values[0]
       : f.kind === 'number' ? '100' : 'sample-' + f.name;
     positive[f.name] = sample;
-    inverted[f.name] = sample;
+    negative[f.name] = sample;
   }
   if (rangeFields.length) {
     const minName = rangeFields[0].min_ref;
     const maxName = rangeFields[0].name;
     if (positive[minName] !== undefined) {
-      inverted[minName] = '90';
-      inverted[maxName] = '50';  // inverted: gate MUST refuse
+      negative[minName] = '90';
+      negative[maxName] = '50';  // inverted: gate MUST refuse
     }
+  } else {
+    const enumField = proposal.fields.find(f => f.values && f.values.length);
+    const numberField = proposal.fields.find(f => f.kind === 'number');
+    if (enumField) {
+      negative[enumField.name] = '__out_of_enum__';  // not in the closed set
+    } else if (numberField) {
+      negative[numberField.name] = 'not-a-number';  // gate refuses: unverifiable
+    }
+    // Neither constraint: the cases cannot falsify anything. Sending them
+    // anyway would mean case 2 fails and adoption 409s forever; omitting
+    // the negative case is the honest statement that this contract has no
+    // mechanical edge for the case builder to press on.
   }
+  const falsifiable = rangeFields.length ||
+    proposal.fields.some(f => (f.values && f.values.length)) ||
+    proposal.fields.some(f => f.kind === 'number');
   return [
     { ...positive, expected: 'verified' },
-    ...(rangeFields.length ? [{ ...inverted, expected: 'mismatch' }] : []),
+    ...(falsifiable ? [{ ...negative, expected: 'mismatch' }] : []),
   ];
 }
 
