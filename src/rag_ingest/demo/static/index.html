@@ -100,8 +100,8 @@
       <input type="file" id="file" accept="application/pdf" hidden>
     </div>
     <div class="row" id="file-actions" style="margin-top:8px;display:none">
-      <button class="primary" onclick="ingestStaged('whole')">Ingest whole document</button>
-      <button onclick="ingestStaged('auto')">Auto-slice ingest</button>
+      <button id="btn-whole" onclick="ingestStaged('whole')">Ingest whole document</button>
+      <button id="btn-auto" onclick="ingestStaged('auto')">Auto-slice ingest</button>
       <button onclick="clearStaged()">✕</button>
     </div>
     <div class="row" style="margin-top:12px">
@@ -181,9 +181,18 @@ fileInput.onchange = () => fileInput.files[0] && stageFile(fileInput.files[0]);
 // manual the whole-document path costs 35s+ and a memory spike before the
 // owner can choose auto-slice, so the strategy is an explicit choice.
 let staged = null;
+// Which strategy is primary is a property of the staged file, not a UI
+// default: a small PDF is one ordinary ingest, a large one is slices. Size
+// is the proxy we have client-side (page count needs a parse); the
+// threshold sits well below where the whole-document path starts hurting.
+const WHOLE_DOC_SIZE_LIMIT_MB = 5;
 function stageFile(file) {
   staged = file;
-  $('#drop-label').textContent = `Ready: ${file.name} (${(file.size / 1048576).toFixed(1)} MB)`;
+  const mb = file.size / 1048576;
+  const wholeIsPrimary = mb < WHOLE_DOC_SIZE_LIMIT_MB;
+  $('#btn-whole').classList.toggle('primary', wholeIsPrimary);
+  $('#btn-auto').classList.toggle('primary', !wholeIsPrimary);
+  $('#drop-label').textContent = `Ready: ${file.name} (${mb.toFixed(1)} MB)`;
   $('#file-actions').style.display = 'flex';
 }
 function clearStaged() {
