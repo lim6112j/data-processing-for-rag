@@ -1541,3 +1541,64 @@ class TestStaleItemsCloseWhenChunkVerifies:
         # is answered by the pipeline and must not stay open.
         assert view.verified_count >= 1
         assert session.open_items() == []
+
+
+class TestLightRagEndpoints:
+    """The export pipeline's buttons need server-side proxies: push sends the
+    session's verified rows to the configured LightRAG server, clear empties
+    it. Both act only on verified output -- the gate's discipline carries to
+    the retrieval store, including its destructive edge."""
+
+    def test_push_reports_accepted_and_duplicate_counts(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import rag_ingest.demo.server as server_mod
+
+        class _Result:
+            accepted, duplicates, failed = ("a1", "a2"), ("d1",), ()
+
+        captured = {}
+
+        def fake_push(rows, poster):
+            captured["rows"] = list(rows)
+            return _Result()
+
+        monkeypatch.setattr(server_mod, "_push_rows", fake_push)
+        original = server_mod._session
+        server_mod._session = DemoSession(today=TODAY)
+        try:
+            response = TestClient(server_mod.app).post("/api/lightrag/push")
+        finally:
+            server_mod._session = original
+
+        assert response.status_code == 200
+        assert response.json() == {"accepted": 2, "duplicates": 1, "failed": 0}
+
+    def test_clear_posts_delete_to_the_configured_base(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import rag_ingest.demo.server as server_mod
+
+        captured = {}
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"status": "success"}'
+
+        def fake_urlopen(request, timeout):
+            captured["method"] = request.method
+            captured["url"] = request.full_url
+            return _Response()
+
+        monkeypatch.setattr(server_mod, "_urlopen", fake_urlopen)
+        response = TestClient(server_mod.app).post("/api/lightrag/clear")
+
+        assert response.status_code == 200
+        assert captured["method"] == "DELETE"
+        assert captured["url"].endswith("/documents")

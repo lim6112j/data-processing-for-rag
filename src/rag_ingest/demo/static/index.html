@@ -85,6 +85,11 @@
 <header>
   <h1>rag-ingest</h1>
   <span class="sub">Grounding-gated ingestion — verified chunks enter retrieval, everything else becomes a question</span>
+  <div class="row" style="margin-top:8px">
+    <button onclick="exportVerified()">⬇ Export verified</button>
+    <button onclick="pushToLightRag()">→ Push to LightRAG</button>
+    <button onclick="clearLightRag()">⌫ Clear LightRAG</button>
+  </div>
 </header>
 
 <main>
@@ -352,6 +357,31 @@ function placeRelative(node, bbox, originLeft, originTop, scale) {
 }
 
 /* ---------- sidebar ---------- */
+async function exportVerified() {
+  const res = await fetch('/api/export');
+  const blob = await res.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'verified-chunks.jsonl';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function pushToLightRag() {
+  const res = await fetch('/api/lightrag/push', { method: 'POST' });
+  if (!res.ok) { alert('Push failed: ' + res.status); return; }
+  const d = await res.json();
+  alert(`Pushed to LightRAG: ${d.accepted} accepted, ${d.duplicates} duplicates, ${d.failed} failed`);
+}
+
+async function clearLightRag() {
+  if (!confirm('Delete every document from the LightRAG server? This wipes retrieval knowledge and cannot be undone.')) return;
+  const res = await fetch('/api/lightrag/clear', { method: 'POST' });
+  if (!res.ok) { alert('Clear failed: ' + res.status); return; }
+  const d = await res.json();
+  alert('LightRAG cleared: ' + (d.status || 'ok'));
+}
+
 async function refreshSidebar() {
   const [review, card, labels, discovery] = await Promise.all([
     (await fetch('/api/review')).json(),

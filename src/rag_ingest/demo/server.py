@@ -221,6 +221,64 @@ def approve_item(item_id: str) -> dict:
     }
 
 
+def _lightrag_base() -> str:
+    import os
+
+    return os.environ.get("RAG_LIGHTRAG_URL", "http://127.0.0.1:9621")
+
+
+def _urlopen(request, timeout):
+    import urllib.request
+
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _push_rows(rows, poster):
+    from rag_ingest.scripts.lightrag_push import push_rows
+
+    return push_rows(rows, poster)
+
+
+@app.post("/api/lightrag/push")
+def push_to_lightrag() -> dict:
+    """Send the session's verified chunks to the LightRAG server.
+
+    The same push_rows the CLI uses: one insert per chunk so the gate's
+    boundaries are what the graph reasons over, duplicates reported rather
+    than swallowed. There is no server-side path that sends anything but
+    verified rows -- the export endpoint's discipline is the push's too.
+    """
+    from rag_ingest.scripts.lightrag_push import http_poster
+
+    result = _push_rows(_session.export_rows(), http_poster(_lightrag_base()))
+    return {
+        "accepted": len(result.accepted),
+        "duplicates": len(result.duplicates),
+        "failed": len(result.failed),
+    }
+
+
+@app.post("/api/lightrag/clear")
+def clear_lightrag() -> dict:
+    """Delete every document from the LightRAG server.
+
+    A deliberate, explicit edge: it wipes retrieval knowledge, so it is a
+    separate endpoint the UI only reaches through a confirmation dialog --
+    never a side effect of another action."""
+    import json as _json
+    import urllib.request
+
+    req = urllib.request.Request(
+        _lightrag_base().rstrip("/") + "/documents",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="DELETE",
+    )
+    with _urlopen(req, timeout=30) as response:
+        body = _json.loads(response.read().decode("utf-8"))
+    return {"status": body.get("status", "ok")}
+
+
 @app.get("/api/export")
 def export_verified_jsonl() -> Response:
     """The session's verified chunks as JSONL for a downstream retrieval store.
