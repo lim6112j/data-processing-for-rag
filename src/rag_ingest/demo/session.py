@@ -151,6 +151,10 @@ class DemoSession:
     outcomes: dict[str, IngestOutcome] = field(default_factory=dict)
     #: Owner approvals by chunk id -- the promotion history export attaches.
     _approvals: dict = field(default_factory=dict)
+    #: Questions the WIP cap refused during this session. A cap that drops
+    #: questions silently is an invisible graveyard -- the count must be
+    #: visible so the owner knows the queue stopped asking.
+    queue_dropped_total: int = 0
     #: Adopted contracts are persisted here (JSON of ``to_definition`` payloads)
     #: and reloaded on construction -- adoption must survive a restart.
     shapes_path: Path | None = None
@@ -213,7 +217,8 @@ class DemoSession:
         # empty while the view still lists items -- the loop would look alive
         # and accept nothing.
         for item in outcome.review_items:
-            self.queue.enqueue(item)
+            if not self.queue.enqueue(item):
+                self.queue_dropped_total += 1
         # A question the pipeline answered during this very ingest is not an
         # owner question: a chunk verified through an adopted contract (row
         # verification, promotion) leaves its "Unrecognised content?" item

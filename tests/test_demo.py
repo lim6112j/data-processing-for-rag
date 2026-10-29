@@ -1602,3 +1602,48 @@ class TestLightRagEndpoints:
         assert response.status_code == 200
         assert captured["method"] == "DELETE"
         assert captured["url"].endswith("/documents")
+
+
+class TestQueueOverflowIsVisible:
+    @pytest.fixture
+    def client(self):
+        from rag_ingest.demo import server
+
+        server._session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        return TestClient(server.app)
+
+    """The WIP cap exists so the queue cannot become a graveyard -- but a cap
+    that silently drops questions makes the graveyard invisible instead. A
+    slice workflow that overflows must show what was lost, or the owner
+    believes everything was asked."""
+
+    def test_dropped_items_are_counted_and_surfaced(self, client, tmp_path, monkeypatch):
+        from datetime import date as _date
+
+        import rag_ingest.demo.server as server_mod
+        from rag_ingest.escalation import EscalationReason, ReviewItem, ReviewQueue
+
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        session.queue = ReviewQueue(wip_limit=1)
+        session.queue.enqueue(ReviewItem(
+            item_id="prefill:chunk:triage", doc_id="prefill", chunk_id="chunk",
+            reason=EscalationReason.UNCLASSIFIED, question="?", owner_id="o",
+            created_on=_date(2026, 10, 1),
+        ))
+        assert session.queue.open_items()
+
+        original = server_mod._session
+        server_mod._session = session
+        try:
+            path = tmp_path / "a.pdf"
+            make_pdf(path)
+            with path.open("rb") as handle:
+                response = client.post(
+                    "/api/ingest?parser=pdfplumber",
+                    files={"file": ("a.pdf", handle, "application/pdf")},
+                )
+        finally:
+            server_mod._session = original
+
+        assert response.status_code == 200, response.text
+        assert response.json()["review_queue_dropped"] >= 1

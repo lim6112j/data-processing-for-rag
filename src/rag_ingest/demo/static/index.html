@@ -253,6 +253,7 @@ function render(view) {
       <div><b>${view.verified_count}</b><span>verified chunks</span></div>
       <div><b>${view.quarantined_count}</b><span>withheld</span></div>
       <div><b>${view.review_items.length}</b><span>queued questions</span></div>
+      ${view.review_queue_dropped ? `<div style="color:var(--bad)"><b>${view.review_queue_dropped}</b><span>questions dropped — queue full</span></div>` : ''}
     </div>
     <div class="legend">
       <span><i style="background:rgba(63,185,80,.5);border:1px solid var(--ok)"></i>verified — enters retrieval</span>

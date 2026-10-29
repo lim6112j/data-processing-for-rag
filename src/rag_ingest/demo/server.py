@@ -137,7 +137,12 @@ async def ingest(
         raw=raw,
         elements=elements,
     )
-    return view.model_dump(mode="json")
+    payload = view.model_dump(mode="json")
+    # The WIP cap may have refused some of this document's questions. Silence
+    # would read as "nothing to review" -- the owner must see the loss to
+    # react to it (resolve, adopt, or ingest narrower slices).
+    payload["review_queue_dropped"] = _session.queue_dropped_total
+    return payload
 
 
 @app.get("/api/page/{doc_id}/{page_no}")
