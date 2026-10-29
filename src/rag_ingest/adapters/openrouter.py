@@ -1,8 +1,9 @@
 """OpenRouter implementation of T2.
 
 Wraps the OpenAI-compatible chat-completions endpoint that OpenRouter exposes.
-The credential is read from ``OPENROUTER_API_KEY`` by the official SDK and never
-touched by this module -- no key is logged, stored, or written to the label set.
+The credential is resolved by the shared ``openrouter_client`` resolver -- the
+OpenAI SDK does not read ``OPENROUTER_API_KEY`` on its own -- and is never
+logged, stored, or written to the label set.
 
 Three things this adapter does deliberately:
 
@@ -27,6 +28,7 @@ import json
 import os
 from typing import Any
 
+from rag_ingest.adapters.openrouter_client import resolve_client
 from rag_ingest.adjudication import AdjudicationDecision, AdjudicationQuestion
 from rag_ingest.ontology import AbstainReason
 
@@ -121,20 +123,14 @@ class OpenRouterAdjudicator:
     # -- client -----------------------------------------------------------
 
     def _get_client(self) -> Any:
-        if self._client is not None:
-            return self._client
-        try:
-            from openai import OpenAI
-        except ImportError as exc:  # pragma: no cover - depends on env
-            raise RuntimeError(
-                "OpenRouter adjudication needs the 'openai' package: uv add openai"
-            ) from exc
-
-        self._client = OpenAI(
-            base_url=self._base_url,
-            api_key=self._api_key,
-            timeout=self._timeout,
-        )
+        if self._client is None:
+            self._client = resolve_client(
+                None,
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self._timeout,
+                feature="OpenRouter adjudication",
+            )
         return self._client
 
     # -- prompt -----------------------------------------------------------

@@ -24,13 +24,34 @@ pytestmark = pytest.mark.live
 
 _HAS_KEY = bool(os.environ.get("OPENROUTER_API_KEY"))
 
-#: A 1x1 PNG: enough to prove the image channel is accepted. Not enough to
-#: adjudicate anything, so a *correct* model answer here is an abstention.
-_TINY_PNG = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-    "0000000a49444154789c6360000002000100ffff03000006000557bfabd40000"
-    "000049454e44ae426082"
-)
+def _tiny_png(size: int = 32) -> bytes:
+    """A solid-colour PNG, built here so the fixture stays self-explanatory.
+
+    Not enough to adjudicate anything, so a *correct* model answer is an
+    abstention. Built at 32x32 because image providers reject degenerate
+    1x1 crops with 'Could not process image' -- a transport-level refusal
+    that says nothing about the wire format this test exists to check.
+    """
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    row = b"\x00" + b"\xf0\xf0\xf0" * size
+    idat = zlib.compress(row * size)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", idat)
+        + chunk(b"IEND", b"")
+    )
 
 
 @pytest.mark.skipif(not _HAS_KEY, reason="OPENROUTER_API_KEY not set")
@@ -49,7 +70,7 @@ def test_live_adjudication_round_trip():
         context_text="a | b | c",
     )
 
-    decision = adjudicator.adjudicate_with_evidence(question, image_png=_TINY_PNG)
+    decision = adjudicator.adjudicate_with_evidence(question, image_png=_tiny_png())
 
     # A blank 1x1 image cannot support either reading, so a well-behaved model
     # abstains. Any coherent decision proves the wire format works; the point of

@@ -24,9 +24,9 @@ reason, never a guessed schema.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
+from rag_ingest.adapters.openrouter_client import OPENROUTER_BASE_URL, resolve_client
 from rag_ingest.propose import FieldEvidence, Proposal
 from rag_ingest.shapes import FieldSpec
 
@@ -117,17 +117,11 @@ class LlmProposer:
     def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
-        try:
-            from openai import OpenAI
-        except ImportError as exc:  # pragma: no cover - depends on env
-            raise RuntimeError(
-                "LLM proposals need the 'openai' package: uv add openai"
-            ) from exc
-        self._client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            # OpenRouter's key lives in OPENROUTER_API_KEY, which the OpenAI
-            # SDK does not read -- resolve it here, like the T2 adjudicator.
-            api_key=self._api_key or os.environ.get("OPENROUTER_API_KEY"),
+        self._client = resolve_client(
+            None,
+            api_key=self._api_key,
+            base_url=OPENROUTER_BASE_URL,
+            feature="LLM proposals",
         )
         return self._client
 
