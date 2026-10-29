@@ -101,6 +101,11 @@
     <div class="row" id="file-actions" style="margin-top:8px;display:none">
       <button id="btn-whole" onclick="ingestStaged('whole')">Ingest whole document</button>
       <button id="btn-auto" onclick="ingestStaged('auto')">Auto-slice ingest</button>
+      <label class="meta" style="display:flex;align-items:center;gap:4px">
+        batch
+        <input id="batch-size" type="number" min="1" value="20" style="width:56px">
+        <span>pages</span>
+      </label>
       <button onclick="clearStaged()">✕</button>
     </div>
     <div class="row" style="margin-top:12px">
@@ -415,7 +420,8 @@ async function autoSliceIngest() {
   const form = new FormData();
   form.append('file', staged);
   try {
-    const res = await fetch(`/api/ingest/auto?parser=${encodeURIComponent($('#parser').value)}&batch=20`, {
+    const batch = Math.max(1, parseInt($('#batch-size').value, 10) || 20);
+    const res = await fetch(`/api/ingest/auto?parser=${encodeURIComponent($('#parser').value)}&batch=${batch}`, {
       method: 'POST', body: form,
     });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
