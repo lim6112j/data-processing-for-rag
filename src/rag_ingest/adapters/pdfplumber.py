@@ -129,8 +129,16 @@ def pdf_to_raw(
     doc_id: str,
     render_images: bool = True,
     image_resolution: int = 144,
+    pages: tuple[int, int] | None = None,
 ) -> tuple[RawDocument, list[Element]]:
     """Parse a PDF with pdfplumber into the docmodel contract.
+
+    ``pages`` selects an inclusive 1-based page range ``(start, end)`` so a
+    600-page manual is ingested as slices. Page numbers are NOT renumbered:
+    a slice of pages 101-110 produces elements tagged 101-110, so provenance
+    spans still point at the physical document the reader holds. A range
+    extending past the last page clamps there -- slices are composed by a
+    caller that does not know the page count in advance.
 
     ``render_images`` produces page PNGs so T2 can crop evidence. Keep it on
     unless memory is tight: without images T2 abstains on every question.
@@ -146,7 +154,8 @@ def pdf_to_raw(
     page_sizes: dict[int, tuple[float, float]] = {}
 
     with pdfplumber.open(path) as pdf:
-        for page_no, page in enumerate(pdf.pages, start=1):
+        selected = _page_slice(pdf.pages, pages)
+        for page_no, page in selected:
             elements.extend(page_to_elements(page, page_no))
             page_sizes[page_no] = (float(page.width), float(page.height))
             if render_images:
@@ -157,6 +166,28 @@ def pdf_to_raw(
     return RawDocument.from_elements(
         doc_id, elements, page_images=page_images, page_sizes=page_sizes
     )
+
+
+def _page_slice(
+    all_pages: list[Any],
+    pages: tuple[int, int] | None,
+) -> list[tuple[int, Any]]:
+    """Resolve a requested inclusive page range to (page_no, page) pairs.
+
+    ``None`` means every page. The lower bound is clamped up from below 1 and
+    the upper bound clamped down to the document's end: callers building
+    slices with overlap cannot know the page count beforehand, and a range
+    past the end is a request for "the rest", not an error.
+    """
+    enumerated = list(enumerate(all_pages, start=1))
+    if pages is None:
+        return enumerated
+    start, end = pages
+    start = max(start, 1)
+    end = min(end, len(enumerated))
+    if start > end:
+        return []
+    return enumerated[start - 1 : end]
 
 
 def _render_page(page: Any, *, resolution: int) -> bytes | None:

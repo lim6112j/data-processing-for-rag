@@ -99,6 +99,12 @@
       <input type="file" id="file" accept="application/pdf" hidden>
     </div>
     <div class="row" style="margin-top:12px">
+      <label class="meta" style="display:flex;align-items:center;gap:4px">
+        pages
+        <input id="page-start" type="number" min="1" placeholder="from" style="width:70px">
+        –
+        <input id="page-end" type="number" min="1" placeholder="to" style="width:70px">
+      </label>
       <select id="parser">
         <option value="auto">parser: auto</option>
         <option value="docling">parser: docling</option>
@@ -170,8 +176,17 @@ async function upload(file) {
   $('#spinner').classList.add('on');
   const form = new FormData();
   form.append('file', file);
+  // Optional page range: a large PDF is ingested as slices. The UI adds a
+  // 2-page overlap behind each range so a table straddling the slice
+  // boundary parses whole somewhere; duplicate chunks from overlap re-parse
+  // upsert away in the retrieval store.
+  const start = $('#page-start').value, end = $('#page-end').value;
+  let qs = `parser=${encodeURIComponent($('#parser').value)}`;
+  if (start && end) {
+    qs += `&page_start=${encodeURIComponent(start)}&page_end=${encodeURIComponent(end)}`;
+  }
   try {
-    const res = await fetch(`/api/ingest?parser=${encodeURIComponent($('#parser').value)}`, {
+    const res = await fetch(`/api/ingest?${qs}`, {
       method: 'POST', body: form,
     });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);

@@ -91,13 +91,28 @@ def set_config(t2: bool = False, force_ambiguous: bool = False) -> dict:
 
 
 @app.post("/api/ingest")
-async def ingest(file: UploadFile = File(...), parser: str = "auto") -> dict:
-    """Parse an uploaded PDF and run it through the cascade."""
+async def ingest(
+    file: UploadFile = File(...),
+    parser: str = "auto",
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> dict:
+    """Parse an uploaded PDF and run it through the cascade.
+
+    ``page_start``/``page_end`` (1-based, inclusive) turn one large PDF into
+    slice uploads: the doc_id carries the part so slices accumulate under one
+    logical document, and the parsed page numbers stay the PDF's own so
+    provenance keeps pointing at the physical pages."""
     payload = await file.read()
     if not payload:
         raise HTTPException(400, "empty upload")
 
     doc_id = Path(file.filename or "document").stem
+    if page_start is not None and page_end is not None:
+        if page_start < 1 or page_end < page_start:
+            raise HTTPException(400, "invalid page range")
+        doc_id = f"{doc_id}:part{page_start:04d}-{page_end:04d}"
+    pages = (page_start, page_end) if page_start is not None and page_end is not None else None
     suffix = Path(file.filename or "x.pdf").suffix or ".pdf"
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
@@ -107,7 +122,9 @@ async def ingest(file: UploadFile = File(...), parser: str = "auto") -> dict:
     try:
         from rag_ingest.demo.parsing import parse_pdf
 
-        raw, elements, resolved_parser = parse_pdf(temp_path, doc_id=doc_id, parser=parser)
+        raw, elements, resolved_parser = parse_pdf(
+            temp_path, doc_id=doc_id, parser=parser, pages=pages
+        )
     except Exception as exc:  # a bad upload must not 500 the demo
         raise HTTPException(422, f"{type(exc).__name__}: {exc}") from exc
     finally:

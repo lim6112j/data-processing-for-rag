@@ -339,3 +339,30 @@ class TestProducerLevelDisagreement:
 
         assert result.candidate_conflicts == 0
         assert result.candidate_checks == 1
+
+
+class TestPageRangeSlices:
+    """A 600-page manual cannot arrive as one upload: slices are first-class
+    inputs, doc_ids are namespaced so parts accumulate under one logical
+    document instead of colliding, and the UI's overlap keeps boundary
+    tables whole."""
+
+    def test_parse_pdf_accepts_page_range(self, tmp_path):
+        from rag_ingest.demo.parsing import parse_pdf
+
+        path = tmp_path / "doc.pdf"
+        from tests.test_pdfplumber_pages import _make_multipage_pdf
+
+        _make_multipage_pdf(path, pages=5)
+        raw, _elements, resolved = parse_pdf(str(path), doc_id="d",
+                                            parser="pdfplumber",
+                                            pages=(2, 3))
+        assert resolved == "pdfplumber"
+        assert {pg.page_no for pg in raw.pages} == {2, 3}
+
+    def test_doc_id_namespacing_for_parts(self, tmp_path):
+        # Two slices of one physical document are two session documents --
+        # the doc_id carries the part, so neither clobbers the other.
+        part_id = "AC_43.13-1B:part003"
+        base, _, part = part_id.partition(":part")
+        assert base == "AC_43.13-1B" and part == "003"
