@@ -199,6 +199,25 @@ class VerifyShapeRequest(BaseModel):
     values: dict[str, str]
 
 
+@app.get("/api/export")
+def export_verified_jsonl() -> Response:
+    """The session's verified chunks as JSONL for a downstream retrieval store.
+
+    A projection of the gate, not a choice: quarantined chunks cannot appear
+    here no matter how the request is shaped, because export reads only
+    ``verified_chunks`` from the pipeline's outcomes. The text/plain response
+    is one JSON object per line -- the format the push script round-trips."""
+    from rag_ingest.export import export_verified
+
+    records = [
+        record
+        for outcome in _session.outcomes.values()
+        for record in outcome.verified_chunks
+    ]
+    body = "\n".join(row.to_jsonl() for row in export_verified(records))
+    return Response(content=body + ("\n" if body else ""), media_type="text/plain")
+
+
 @app.get("/api/discovery")
 def discovery() -> dict | None:
     """Shape clusters among quarantined chunks, across ingested documents."""

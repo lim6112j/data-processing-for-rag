@@ -7,6 +7,7 @@ scorecard.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -1377,3 +1378,31 @@ class TestProseChunksVerifyByDefault:
         assert view.verified_count >= 1, [
             (c.verified, c.text[:40]) for c in view.chunks
         ]
+
+
+class TestExportEndpoint:
+    """The session's honest output as a file: verified chunks only, in a
+    format the LightRAG pusher can read back. Quarantined chunks cannot
+    appear here -- the endpoint is a projection of the gate, not a choice."""
+
+    def test_export_returns_jsonl_of_verified_chunks_only(self):
+        from fastapi.testclient import TestClient
+
+        import rag_ingest.demo.server as server_mod
+
+        raw, elements = _source("본 대장은 자재창고의 월간 재고 현황을 기록한다. " * 10)
+        session = DemoSession(today=TODAY)
+        session.ingest(doc_id="d1", filename="a.pdf", parser="test",
+                       raw=raw, elements=elements)
+
+        original, server_mod._session = server_mod._session, session
+        try:
+            response = TestClient(server_mod.app).get("/api/export")
+        finally:
+            server_mod._session = original
+
+        assert response.status_code == 200
+        lines = [json.loads(line) for line in response.text.splitlines() if line]
+        assert lines
+        assert all(line["export_format"] == "rag_export_v1" for line in lines)
+        assert all(line["doc_id"] == "d1" for line in lines)
