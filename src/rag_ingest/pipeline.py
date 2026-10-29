@@ -227,7 +227,9 @@ class IngestPipeline:
             )
 
         row_observations = self._route_table_rows(quarantined, chunks)
-        row_verifications = self._verify_rows(quarantined, chunks, raw, gate)
+        row_verifications = self._verify_rows(
+            quarantined, verified, chunks, raw, gate
+        )
         return IngestOutcome(
             doc_id=raw.doc_id,
             verified_chunks=tuple(verified),
@@ -259,6 +261,7 @@ class IngestPipeline:
     def _verify_rows(
         self,
         quarantined: list[ChunkRecord],
+        verified: list[ChunkRecord],
         chunks: list[Chunk],
         raw: RawDocument,
         gate: GroundingGate,
@@ -275,14 +278,53 @@ class IngestPipeline:
             return ()
         quarantined_ids = {r.chunk_id for r in quarantined}
         verifications: list[RowVerification] = []
+        promote: list[Chunk] = []
         for chunk in chunks:
             if chunk.chunk_id not in quarantined_ids or chunk.kind.value != "table":
                 continue
             rows = _split_rows(chunk, self._elements_by_chunk(chunk))
             if not rows:
                 continue
-            verifications.extend(verify_rows(rows, chunk, gate, self._registry))
+            chunk_verifications = verify_rows(rows, chunk, gate, self._registry)
+            verifications.extend(chunk_verifications)
+            # A table whose matched rows ALL ground is understood: the contract
+            # answered the question quarantine was asking. Header rows (and
+            # rows matching no contract) are not counted against it -- they
+            # stay discovery observations. One refused row keeps the whole
+            # chunk withheld: a partially understood table is not understood.
+            if chunk_verifications and all(
+                v.status == "grounded" for v in chunk_verifications
+            ):
+                promote.append(chunk)
+        self._promote_verified_chunks(quarantined, verified, promote)
         return tuple(verifications)
+
+    def _promote_verified_chunks(
+        self,
+        quarantined: list[ChunkRecord],
+        verified: list[ChunkRecord],
+        promote: list[Chunk],
+    ) -> None:
+        """Move fully-verified table chunks from quarantine to the store.
+
+        The record is re-issued, not mutated: frozen records are the audit
+        trail, so promotion produces a new record carrying the contract's
+        strict bar -- the same evidence standard a hand-written template
+        extraction would have been held to."""
+        if not promote:
+            return
+        promoted_ids = {c.chunk_id for c in promote}
+        remaining: list[ChunkRecord] = []
+        for record in quarantined:
+            if record.chunk_id in promoted_ids:
+                verified.append(
+                    record.model_copy(
+                        update={"verified": True, "gate_tier": GateTier.STRICT}
+                    )
+                )
+            else:
+                remaining.append(record)
+        quarantined[:] = remaining
 
     def _elements_by_chunk(self, chunk: Chunk) -> list[Element]:
         """The chunk's own elements, with resolved offsets, in order."""

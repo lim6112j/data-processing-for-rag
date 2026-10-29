@@ -276,3 +276,81 @@ class TestRowContractVerification:
         )
 
         assert outcome.row_verifications == ()
+
+
+class TestChunkPromotionByRowVerification:
+    """A table chunk whose rows all ground under an adopted contract is
+    understood: withholding it would ask the owner a question the contract
+    already answered. The promotion is T1's own mechanical verdict -- every
+    cell grounded through the standard gate -- never a shortcut around it."""
+
+    def _contract(self, name, kinds):
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        return ShapeContract(
+            name=name,
+            tier="strict",
+            fields=tuple(
+                FieldSpec(name=f"field_{i}", kind=kind, required=True)
+                for i, kind in enumerate(kinds)
+            ),
+        )
+
+    def _ingest(self, contract, table_rows, doc_id="kr"):
+        from rag_ingest.escalation import ReviewQueue
+        from rag_ingest.pipeline import IngestPipeline
+        from rag_ingest.shapes import ShapeRegistry
+
+        registry = ShapeRegistry()
+        registry.register(contract)
+        elements = [
+            paragraph("부품 재고 관리 대장. " * 20),
+            table(table_rows),
+        ]
+        raw, located = RawDocument.from_elements(doc_id, elements)
+        pipeline = IngestPipeline(ReviewQueue(), NoneExtractor(), today=TODAY,
+                                  registry=registry)
+        return pipeline.ingest(raw, located, owner_id="owner-1")
+
+    def test_all_rows_grounded_promotes_the_table_chunk(self):
+        outcome = self._ingest(
+            self._contract("row:text,text,text,text,number,number_spec",
+                           ("text", "text", "text", "text", "number", "number")),
+            (
+                ("품목코드", "품목명", "규격", "단위", "재고", "안전재고"),
+                ("IV-001", "육안검사기", "KS-A 12mm", "개", "150", "30"),
+                ("IV-002", "베어링6204", "20x47x14", "개", "2,400", "500"),
+            ),
+        )
+
+        verified_texts = [c.text for c in outcome.verified_chunks]
+        assert any("IV-001" in t for t in verified_texts)
+        assert not any("IV-001" in c.text for c in outcome.quarantined_chunks)
+
+    def test_a_refused_row_keeps_the_chunk_withheld(self):
+        from rag_ingest.shapes import FieldSpec, ShapeContract
+
+        # An enum contract: one row violates the closed set, so the chunk
+        # stays a question -- a partially understood table is not understood.
+        contract = ShapeContract(
+            name="row:text,text,text,text_spec",
+            tier="strict",
+            fields=(
+                FieldSpec(name="field_0", kind="text", required=True),
+                FieldSpec(name="field_1", kind="enum", required=True,
+                          values=("PASS", "FAIL", "HOLD")),
+                FieldSpec(name="field_2", kind="text", required=False),
+                FieldSpec(name="field_3", kind="text", required=False),
+            ),
+        )
+        outcome = self._ingest(
+            contract,
+            (
+                ("부품코드", "상태", "판정", "메모"),
+                ("AN310-4", "PASS", "합격", "정상"),
+                ("MS20365-3", "폐기", "불합격", "손상"),
+            ),
+        )
+
+        assert any("MS20365-3" in c.text for c in outcome.quarantined_chunks)
+        assert not any("MS20365-3" in c.text for c in outcome.verified_chunks)
