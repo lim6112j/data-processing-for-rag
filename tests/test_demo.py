@@ -1470,3 +1470,33 @@ class TestApproveEndpoint:
         assert export.status_code == 200
         lines = [json.loads(line) for line in export.text.splitlines() if line]
         assert any(r.get("approval") for r in lines)
+
+
+class TestDiscoveryAfterPromotion:
+    """A promoted chunk is no longer a question, so its rows must not keep
+    posing as one: discovery clusters built from stale row observations
+    offered Define buttons with no withheld chunk behind them."""
+
+    def test_promoted_table_rows_leave_discovery(self):
+        raw, located = RawDocument.from_elements(
+            "d1",
+            [Element(element_id="t1", kind=ElementKind.TABLE, page=1,
+                     text="부서 | 점검항목 | 상태 | 비고\n"
+                          "생산팀 | 라인 점검 | 완료 | 특이 없음\n"
+                          "품질팀 | 샘플 검사 | 진행중 | 재검사 예정",
+                     table_rows=[["부서", "점검항목", "상태", "비고"],
+                                 ["생산팀", "라인 점검", "완료", "특이 없음"],
+                                 ["품질팀", "샘플 검사", "진행중", "재검사 예정"]])],
+            page_sizes={1: (612.0, 792.0)},
+        )
+        session = DemoSession(today=TODAY, extractor=TemplateExtractor())
+        view = session.ingest(doc_id="d1", filename="a.pdf", parser="test",
+                              raw=raw, elements=located)
+        assert view.quarantined_count >= 1
+        assert session.outcomes["d1"].row_observations
+        report = session.discovery_report()
+        assert report is not None and report.clusters
+
+        session.approve_chunk(view.review_items[0].item_id)
+
+        assert session.discovery_report() is None

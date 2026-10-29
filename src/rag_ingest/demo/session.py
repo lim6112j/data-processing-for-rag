@@ -294,7 +294,16 @@ class DemoSession:
         row_observations = []
         for outcome in self.outcomes.values():
             quarantined.extend(outcome.quarantined_chunks)
-            row_observations.extend(outcome.row_observations)
+            # Row observations outlive their chunk: promotion leaves them in
+            # the outcome while the chunk moves to verified. A row whose
+            # chunk is no longer quarantined is not a question anymore -- it
+            # must not keep offering Define buttons with nothing behind them.
+            withheld_texts = [c.text for c in outcome.quarantined_chunks]
+            row_observations.extend(
+                o
+                for o in outcome.row_observations
+                if any(o.row_text in text for text in withheld_texts)
+            )
         if not quarantined and not row_observations:
             return None
         report = discover(tuple(quarantined)) if quarantined else None
